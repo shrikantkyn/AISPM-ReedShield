@@ -1,0 +1,162 @@
+[
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.1",
+    "subcategory": "A.5.1 Policies for information security are defined and enforced as code",
+    "cpm_control": "OPA:prompt_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.7",
+    "subcategory": "A.5.7 Threat intelligence: threat findings are collected and actioned",
+    "cpm_control": "Threat findings + cases",
+    "evaluation_rule": "incident_case_workflow"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.15",
+    "subcategory": "A.5.15 Access control: role-based permissions govern every API",
+    "cpm_control": "RBAC matrix",
+    "evaluation_rule": "rbac_matrix_defined"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.16",
+    "subcategory": "A.5.16 Identity management: human and machine identities are registered with owners",
+    "cpm_control": "Machine identity register",
+    "evaluation_rule": "nhi_register_current"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.17",
+    "subcategory": "A.5.17 Authentication information: credentials rotated on schedule",
+    "cpm_control": "Integration credential rotation",
+    "evaluation_rule": "integration_credentials_rotated"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.23",
+    "subcategory": "A.5.23 Cloud services: sanctioned AI SaaS is governed by an acceptable-use policy",
+    "cpm_control": "Shadow AI discovery",
+    "evaluation_rule": "shadow_ai_policy_enforced"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.24",
+    "subcategory": "A.5.24 Incident management planning: alerts escalate to cases with an owner",
+    "cpm_control": "Cases workflow",
+    "evaluation_rule": "incident_case_workflow"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.28",
+    "subcategory": "A.5.28 Collection of evidence: audit trail exported and retained",
+    "cpm_control": "Audit export",
+    "evaluation_rule": "audit_export_recent"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "ORGANIZATIONAL",
+    "category": "ISO27001-A.5.34",
+    "subcategory": "A.5.34 Privacy and PII: PII detected and redacted in AI outputs",
+    "cpm_control": "Output guard + OPA pii_policy",
+    "evaluation_rule": "pii_redaction_enabled"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.2",
+    "subcategory": "A.8.2 Privileged access: machine identities are least-privilege and owned",
+    "cpm_control": "Machine identity register",
+    "evaluation_rule": "nhi_register_current"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.8",
+    "subcategory": "A.8.8 Technical vulnerabilities: models scanned before deployment",
+    "cpm_control": "ModelScan sidecar",
+    "evaluation_rule": "model_security_scanner_reachable"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.9",
+    "subcategory": "A.8.9 Configuration management: posture drift detected on AI assets",
+    "cpm_control": "Posture snapshots",
+    "evaluation_rule": "snapshots_recent"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.12",
+    "subcategory": "A.8.12 Data leakage prevention: output guard blocks or redacts secrets and PII",
+    "cpm_control": "Output guard",
+    "evaluation_rule": "pii_redaction_enabled"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.15",
+    "subcategory": "A.8.15 Logging: security events are logged and exported",
+    "cpm_control": "Audit export",
+    "evaluation_rule": "audit_export_recent"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.16",
+    "subcategory": "A.8.16 Monitoring activities: continuous runtime monitoring is live",
+    "cpm_control": "Prometheus + Flink CEP",
+    "evaluation_rule": "prometheus_reachable"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.25",
+    "subcategory": "A.8.25 Secure development life cycle: AI code scanned in CI",
+    "cpm_control": "Code Guardrails",
+    "evaluation_rule": "codeguard_scan_recent"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.28",
+    "subcategory": "A.8.28 Secure coding: no hardcoded secrets or unsafe AI patterns in repositories",
+    "cpm_control": "Code Guardrails",
+    "evaluation_rule": "codeguard_no_critical"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.29",
+    "subcategory": "A.8.29 Security testing: red-team probes executed against the pipeline",
+    "cpm_control": "Simulation Lab / Garak",
+    "evaluation_rule": "redteam_run_recent"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.30",
+    "subcategory": "A.8.30 Outsourced development: third-party components inventoried with licenses",
+    "cpm_control": "AI-BOM license policy",
+    "evaluation_rule": "bom_licenses_allowed"
+  },
+  {
+    "framework": "ISO_27001",
+    "function": "TECHNOLOGICAL",
+    "category": "ISO27001-A.8.32",
+    "subcategory": "A.8.32 Change management: model promotion gated by approval",
+    "cpm_control": "Model status gate",
+    "evaluation_rule": "model_approved_exists"
+  }
+]

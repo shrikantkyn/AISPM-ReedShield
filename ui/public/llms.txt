@@ -1,0 +1,30 @@
+# ReedShield
+
+> ReedShield is an AI Security Posture Management (AI-SPM) platform. It discovers AI
+> agents, models, APIs, data sources, non-human identities and the cloud
+> infrastructure AI runs on, then continuously scores risk, enforces policy and
+> prioritizes remediation.
+
+## What ReedShield does
+
+- AI asset discovery: inventory every model, agent, LLM app, tool, API and data source.
+- AI model & agent security: scan artefacts and govern autonomous agents at runtime.
+- Cloud, data and identity security: correlate AI risk with the posture around it.
+- Runtime security: inspect prompts, responses, tool calls and policy decisions live.
+- Attack paths: chain findings (exposed secret to over-privileged role to exposed data).
+- Governance & compliance: map controls to frameworks and score them from live evidence.
+
+## Compliance frameworks (control mapping, not certification)
+
+- DPDP Act 2023, NIST AI RMF, ISO/IEC 42001, ISO/IEC 27001, OWASP LLM Top 10,
+  HIPAA, RBI, IRDAI, SEBI CSCRF, CERT-In, EU AI Act.
+
+## Key pages
+
+- Home: https://reedshield.io/home
+- Get started: https://reedshield.io/get-started
+
+## Notes
+
+- Control mapping indicates coverage, not accredited certification.
+- The authenticated product (/admin) is not part of the public site.

@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ReedShield AI-SPM — Complete User Journey Guide</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 20mm 15mm 20mm 15mm;
+      @bottom-right {
+        content: counter(page);
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 9pt;
+        color: #64748b;
+      }
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #0f172a;
+      background: #ffffff;
+      line-height: 1.5;
+      font-size: 10pt;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .cover-page {
+      page-break-after: always;
+      padding: 40px 10px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 90vh;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      font-size: 8pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-radius: 4px;
+      background: #0ea5e9;
+      color: #ffffff;
+      margin-bottom: 20px;
+    }
+    .badge-secondary {
+      background: #f1f5f9;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+    }
+    .cover-title {
+      font-size: 28pt;
+      font-weight: 800;
+      color: #0f172a;
+      line-height: 1.15;
+      margin-bottom: 12px;
+      letter-spacing: -0.02em;
+    }
+    .cover-subtitle {
+      font-size: 14pt;
+      font-weight: 500;
+      color: #475569;
+      line-height: 1.4;
+      margin-bottom: 30px;
+    }
+    .cover-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+      border-top: 2px solid #0f172a;
+      border-bottom: 1px solid #e2e8f0;
+      padding: 20px 0;
+      margin-top: 20px;
+    }
+    .cover-meta-item strong {
+      display: block;
+      font-size: 8pt;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      margin-bottom: 4px;
+    }
+    .cover-meta-item span {
+      font-size: 10.5pt;
+      font-weight: 600;
+      color: #0f172a;
+      font-family: monospace;
+    }
+    .executive-summary-box {
+      background: #f8fafc;
+      border-left: 4px solid #0ea5e9;
+      padding: 16px 20px;
+      border-radius: 0 8px 8px 0;
+      margin-top: 40px;
+    }
+    .executive-summary-box h3 {
+      font-size: 11pt;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 6px;
+    }
+    .executive-summary-box p {
+      color: #334155;
+      font-size: 9.5pt;
+    }
+    .toc-section {
+      page-break-after: always;
+      padding-top: 20px;
+    }
+    h2.section-header {
+      font-size: 16pt;
+      font-weight: 800;
+      color: #0f172a;
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 6px;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    h2.section-header .step-tag {
+      font-size: 9pt;
+      font-weight: 700;
+      color: #0284c7;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .journey-step {
+      margin-bottom: 28px;
+      page-break-inside: avoid;
+    }
+    .step-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 10px;
+      background: #ffffff;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+    .step-card-header {
+      background: #f8fafc;
+      padding: 10px 16px;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .step-card-header h3 {
+      font-size: 11pt;
+      font-weight: 700;
+      color: #0f172a;
+    }
+    .step-card-header .route-pill {
+      font-family: monospace;
+      font-size: 8.5pt;
+      background: #e0f2fe;
+      color: #0369a1;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .step-card-body {
+      padding: 14px 16px;
+    }
+    .instructions-list {
+      list-style: none;
+      margin-bottom: 12px;
+    }
+    .instructions-list li {
+      position: relative;
+      padding-left: 24px;
+      margin-bottom: 8px;
+      font-size: 9.5pt;
+      color: #334155;
+    }
+    .instructions-list li::before {
+      content: "✓";
+      position: absolute;
+      left: 4px;
+      top: 0;
+      color: #0284c7;
+      font-weight: 900;
+    }
+    .action-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-weight: 600;
+      font-size: 8.5pt;
+      color: #1e293b;
+    }
+    .export-note {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-top: 10px;
+      font-size: 8.5pt;
+      color: #166534;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .export-note strong {
+      font-weight: 700;
+    }
+    .callout {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 9pt;
+      color: #1e40af;
+      margin: 10px 0;
+    }
+    table.summary-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 8.5pt;
+    }
+    table.summary-table th {
+      background: #f1f5f9;
+      text-align: left;
+      padding: 6px 10px;
+      font-weight: 700;
+      color: #334155;
+      border-bottom: 1px solid #cbd5e1;
+    }
+    table.summary-table td {
+      padding: 6px 10px;
+      border-bottom: 1px solid #e2e8f0;
+      color: #334155;
+    }
+    .page-break {
+      page-break-after: always;
+    }
+    .footer-bar {
+      margin-top: 30px;
+      padding-top: 12px;
+      border-top: 1px solid #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+      font-size: 8pt;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── COVER PAGE ── -->
+  <div class="cover-page">
+    <div>
+      <span class="badge">Enterprise Security Blueprint</span>
+      <h1 class="cover-title">ReedShield AI-SPM</h1>
+      <p class="cover-subtitle">Complete Operational Journey & Functional Guide for AI Security Posture Management</p>
+
+      <div class="executive-summary-box">
+        <h3>Platform Purpose & Non-Technical Overview</h3>
+        <p>ReedShield is an enterprise-grade AI Security Posture Management (AI-SPM) platform designed to discover, govern, and defend AI models, autonomous agents, and RAG context pipelines. This document outlines the step-by-step end-to-end journey through all 13 security operational modules, explaining what each screen displays, what decisions can be made, and how reports can be exported for compliance audits.</p>
+      </div>
+
+      <div class="cover-meta-grid">
+        <div class="cover-meta-item">
+          <strong>Application Version</strong>
+          <span>v3.0.0 (Enterprise Suite)</span>
+        </div>
+        <div class="cover-meta-item">
+          <strong>Document Classification</strong>
+          <span>CONFIDENTIAL / OPERATIONAL</span>
+        </div>
+        <div class="cover-meta-item">
+          <strong>Live Access Endpoint</strong>
+          <span>buf-tank-interpretation-elevation.trycloudflare.com</span>
+        </div>
+        <div class="cover-meta-item">
+          <strong>As of Date</strong>
+          <span>September 2026</span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="callout">
+        <strong>💡 Rapid Testing Note:</strong> When testing this deployment over the Cloudflare tunnel, all modules feature built-in automated authentication. You land directly inside the live environment without password prompts.
+      </div>
+      <div class="footer-bar">
+        <span>ReedShield Systems — AI Security Engineering</span>
+        <span>Standard Operating Procedure WP UJ-101</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SECTION 1: DASHBOARD & DISCOVERY ── -->
+  <div class="page-break">
+    <h2 class="section-header">
+      <span>Phase I — Visibility & Executive Cockpit</span>
+      <span class="step-tag">Steps 1 to 3</span>
+    </h2>
+
+    <!-- STEP 1 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 1: Landing & Automated Zero-Friction Authentication</h3>
+          <span class="route-pill">/admin/dashboard</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Access the Link:</strong> Open the provided Cloudflare URL in any desktop or mobile browser.</li>
+            <li><strong>Auto-Authentication:</strong> The built-in dev-token engine verifies your identity as an enterprise administrator (<span class="action-badge">spm:admin</span>) and automatically establishes an active secure session.</li>
+            <li><strong>Arrival:</strong> You land immediately on the <em>Executive Posture Dashboard</em>.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 2 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 2: Executive Posture Dashboard & Trial Balance</h3>
+          <span class="route-pill">/admin/dashboard</span>
+        </div>
+        <div class="step-card-body">
+          <p style="margin-bottom: 10px; color: #475569; font-size: 9.5pt;">The central command view provides instant executive situational awareness across your entire AI infrastructure.</p>
+          <ul class="instructions-list">
+            <li><strong>Review Trial Balance Metrics:</strong>
+              <table class="summary-table">
+                <thead><tr><th>KPI Metric</th><th>Target / Meaning</th><th>Operational Significance</th></tr></thead>
+                <tbody>
+                  <tr><td><strong>Blended Risk Score</strong></td><td>Lower is better (0–100)</td><td>Composite posture score calculated across models, agents, and cloud identities.</td></tr>
+                  <tr><td><strong>Open Critical Alerts</strong></td><td>Count of unmitigated issues</td><td>Immediate attention required (e.g. leaked API keys, exfiltration triggers).</td></tr>
+                  <tr><td><strong>Mean Time to Freeze</strong></td><td>Target: &lt; 60 seconds</td><td>Automated speed at which an out-of-control agent identity is quarantined.</td></tr>
+                  <tr><td><strong>Modules Enforced</strong></td><td>8 of 8 active</td><td>Confirmation that guardrails, code scanners, and audit collectors are live.</td></tr>
+                </tbody>
+              </table>
+            </li>
+            <li><strong>Inspect High-Confidence Attack Path:</strong> Examine the visual 4-step chain diagram showing how a minor vulnerability (e.g. hardcoded secret) can propagate into a customer PII exfiltration incident.</li>
+            <li><strong>Export Executive Sheet:</strong> Click the <span class="action-badge">⬇ Export sheet</span> button located in the top-right of the dashboard card.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Generates <code>reedshield-executive-posture-dashboard-YYYY-MM-DD.csv</code> with all trial balance metrics and recent critical alerts.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 3 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 3: AI Inventory & Asset Discovery</h3>
+          <span class="route-pill">/admin/inventory</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Navigate:</strong> Click <strong>Inventory</strong> in the left sidebar navigation menu.</li>
+            <li><strong>Switch Tabs:</strong> Toggle between the <strong>Models</strong> tab (tracking Foundation LLMs, Embeddings, Voice models) and the <strong>Agents</strong> tab (tracking LangChain, OpenAI Assistants, AutoGPT instances).</li>
+            <li><strong>Filter Assets:</strong> Use the dropdown menus to isolate assets by Risk Tier (<em>Critical, High, Medium, Low</em>), Cloud Provider (<em>AWS, Azure, GCP</em>), or Policy Coverage (<em>Full, Partial, None</em>).</li>
+            <li><strong>Register New Asset:</strong> Click <span class="action-badge">+ Register Asset</span> to catalog a newly developed model or agent.</li>
+            <li><strong>Inspect Asset Details:</strong> Click any asset row to open the lateral drawer showing owners, linked policies, open alerts, and downstream dependencies.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> to download <code>reedshield-ai-inventory-models-YYYY-MM-DD.csv</code> containing model names, providers, owners, and risk status.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── SECTION 2: DEFENSE & HUNTING ── -->
+  <div class="page-break">
+    <h2 class="section-header">
+      <span>Phase II — Security Posture & Threat Detection</span>
+      <span class="step-tag">Steps 4 to 6</span>
+    </h2>
+
+    <!-- STEP 4 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 4: Posture Gap & Domain Analysis</h3>
+          <span class="route-pill">/admin/posture</span>
+        </div>
+        <div class="step-card-body">
+          <p style="margin-bottom: 8px; color: #475569; font-size: 9.5pt;">Deep-dive into coverage across all 8 security domains defining operational AI defense:</p>
+          <ul class="instructions-list">
+            <li><strong>Domain Scores:</strong> Observe real-time evaluations across <em>Guardrail Enforcement (88/100)</em>, <em>Model Integrity (91/100)</em>, <em>Data & Knowledge Trust (63/100)</em>, <em>Simulation Readiness (54/100)</em>, and <em>Identity Scope (79/100)</em>.</li>
+            <li><strong>Review Critical Gaps:</strong> Scroll down to the <em>Posture Gaps</em> list to read prioritized remediation instructions (e.g. <em>"12 production agents missing strict prompt policy"</em>).</li>
+            <li><strong>Trigger Report Generation:</strong> Click <span class="action-badge">✨ Generate Report</span> to trigger an AI-synthesized gap closure checklist.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> to download <code>reedshield-security-posture-YYYY-MM-DD.csv</code> with domain ratings, covered controls, and gap tallies.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 5 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 5: Threat Findings & Active Security Alerts</h3>
+          <span class="route-pill">/admin/alerts</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Navigate:</strong> Click <strong>Findings</strong> in the left sidebar.</li>
+            <li><strong>Review Threats:</strong> Review live detection events from the hunt engine, categorized by attack vector (e.g. <em>Data Exfiltration</em>, <em>Prompt Injection</em>, <em>Tool Abuse</em>, <em>Secret Exposure</em>).</li>
+            <li><strong>Investigate a Threat:</strong> Click any finding in the table. The Action Panel opens on the right showing:
+              <ul style="margin-left: 20px; margin-top: 4px;">
+                <li>The prompt payload and intercepted token stream.</li>
+                <li>Affected model and agent identities.</li>
+                <li>One-click mitigation buttons: <span class="action-badge">Freeze Identity</span>, <span class="action-badge">Revoke Token</span>, <span class="action-badge">Quarantine Tool</span>.</li>
+              </ul>
+            </li>
+            <li><strong>Add Custom Hunt Rule:</strong> Click <span class="action-badge">+ Create Rule</span> to configure a new behavioral detection threshold.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> to download <code>reedshield-threat-findings-YYYY-MM-DD.csv</code> with full incident details and severity classifications.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 6 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 6: Incident Management & Case Tracking</h3>
+          <span class="route-pill">/admin/cases</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Navigate:</strong> Click <strong>Cases</strong> in the left sidebar.</li>
+            <li><strong>Coordinate Response:</strong> Track open security investigations, assign team owners, and monitor SLA countdown clocks to prevent regulatory breach notification lapses.</li>
+            <li><strong>Update Case:</strong> Select a case to add forensic notes, attach evidence payloads, or change status to <em>Investigating</em> or <em>Resolved</em>.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> to generate <code>reedshield-security-cases-YYYY-MM-DD.csv</code> for incident review meetings.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── SECTION 3: GOVERNANCE & CONTROL ── -->
+  <div class="page-break">
+    <h2 class="section-header">
+      <span>Phase III — Governance, Runtime & Lineage</span>
+      <span class="step-tag">Steps 7 to 10</span>
+    </h2>
+
+    <!-- STEP 7 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 7: Data & Knowledge Governance (RAG Safety)</h3>
+          <span class="route-pill">/admin/data</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Inspect Context Sources:</strong> View all vector databases (e.g. Pinecone, Chroma, Milvus), enterprise SharePoint indices, and SQL knowledge sources used by Retrieval-Augmented Generation (RAG) agents.</li>
+            <li><strong>Check Sensitivity & Trust:</strong> Ensure sensitive repositories (tagged <em>Restricted</em> or <em>Confidential</em>) maintain a Trust Score ≥ 80.</li>
+            <li><strong>Audit PII Exposure:</strong> Identify sources containing unmasked personal identifiers, payment cards, or authentication credentials.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> to download <code>reedshield-data-and-knowledge-sources-YYYY-MM-DD.csv</code>.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 8 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 8: Policies & Guardrails Configuration</h3>
+          <span class="route-pill">/admin/policies</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Review Rules:</strong> Inspect active guardrails (e.g. <em>PII-Guard v2</em>, <em>Prompt Injection Shield</em>, <em>Financial Exfiltration Blocker</em>).</li>
+            <li><strong>Toggle Enforcement Mode:</strong> Switch policies between <strong>Monitor</strong> (silent telemetry and logging) and <strong>Enforce</strong> (hard real-time blocking of offending requests).</li>
+            <li><strong>Audit Waivers:</strong> Manage exceptions and business justifications with automatic expiration dates.</li>
+            <li><strong>Single Policy Download:</strong> Click the download icon beside any individual policy to download its standalone JSON schema.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> in the header to download the complete enterprise policy registry in CSV format.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 9 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 9: Runtime Telemetry & Execution Stream</h3>
+          <span class="route-pill">/admin/runtime</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Monitor Live Traffic:</strong> Watch live AI inferences, external tool invocations, and policy block decisions update in real time.</li>
+            <li><strong>Stream Controls:</strong> Click <span class="action-badge">⏸ Pause Stream</span> to freeze the screen for inspection; click <span class="action-badge">▶ Resume</span> to continue streaming.</li>
+            <li><strong>Filter Suspicious:</strong> Toggle the <em>Suspicious Only</em> filter to immediately eliminate benign chatter and isolate flagged actions.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export Events</span> to download <code>reedshield-runtime-execution-events-YYYY-MM-DD.csv</code>.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 10 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 10: Context Lineage Graph & Decision Formation</h3>
+          <span class="route-pill">/admin/lineage</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Visual Topology:</strong> View the full graphical execution path showing how an AI decision was produced:
+              <div style="font-family: monospace; background: #f8fafc; padding: 6px 12px; margin: 8px 0; border: 1px solid #e2e8f0; font-size: 8.5pt;">
+                [User Prompt] ──▶ [RAG Context Chunk] ──▶ [LLM Completion] ──▶ [Tool Execution] ──▶ [Policy Interceptor]
+              </div>
+            </li>
+            <li><strong>Replay Session:</strong> Click <span class="action-badge">▶ Run Simulation</span> to re-execute a historical session's prompt through current guardrails to verify if new policies now block it.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export Trace</span> to download full session graph and node parameters as a JSON report.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── SECTION 4: COMPLIANCE & VALIDATION ── -->
+  <div class="page-break">
+    <h2 class="section-header">
+      <span>Phase IV — Compliance, Shadow AI & Validation</span>
+      <span class="step-tag">Steps 11 to 13</span>
+    </h2>
+
+    <!-- STEP 11 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 11: Compliance Frameworks Scorecard</h3>
+          <span class="route-pill">/admin/compliance</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Select Framework:</strong> Review control readiness scores across major global standards:
+              <table class="summary-table">
+                <thead><tr><th>Framework</th><th>Category</th><th>Target Focus</th></tr></thead>
+                <tbody>
+                  <tr><td><strong>NIST AI RMF</strong></td><td>AI Governance</td><td>Govern, Map, Measure, and Manage functions.</td></tr>
+                  <tr><td><strong>ISO/IEC 42001</strong></td><td>Management System</td><td>Standardized controls for Artificial Intelligence.</td></tr>
+                  <tr><td><strong>EU AI Act</strong></td><td>Regulatory / Risk</td><td>High-risk AI system compliance and prohibited practices.</td></tr>
+                  <tr><td><strong>DPDP Act, 2023</strong></td><td>Privacy / India</td><td>Consent, breach notifications, and sensitive personal data.</td></tr>
+                </tbody>
+              </table>
+            </li>
+            <li><strong>Re-Evaluate Controls:</strong> Click <span class="action-badge">🔄 Re-evaluate</span> to run real-time evidence queries against your active cloud infrastructure.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> to download <code>reedshield-compliance-frameworks-YYYY-MM-DD.csv</code> with all control ratings.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 12 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 12: Shadow AI Discovery & Telemetry</h3>
+          <span class="route-pill">/admin/shadow</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Discovered SaaS AI:</strong> Review unmanaged consumer AI applications (e.g. public ChatGPT, Claude, Midjourney, Jasper) detected across corporate networks via DNS and CASB telemetry.</li>
+            <li><strong>Sanction or Block:</strong> One-click approval to sanction sanctioned corporate subscriptions or block non-compliant platforms.</li>
+            <li><strong>Data Volume Tracking:</strong> Monitor total MB/GB uploaded to consumer AI to prevent data leaks.</li>
+          </ul>
+          <div class="export-note">
+            <span>📊</span>
+            <span><strong>Export Action:</strong> Click <span class="action-badge">⬇ Export</span> to download <code>reedshield-shadow-ai-applications-YYYY-MM-DD.csv</code>.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 13 -->
+    <div class="journey-step">
+      <div class="step-card">
+        <div class="step-card-header">
+          <h3>Step 13: Simulation Lab & Automated Red-Teaming</h3>
+          <span class="route-pill">/admin/simulation</span>
+        </div>
+        <div class="step-card-body">
+          <ul class="instructions-list">
+            <li><strong>Pick Attack Vector:</strong> Choose an attack category: <em>Prompt Injection</em>, <em>Jailbreak Attempt</em>, <em>Data Exfiltration</em>, or <em>Tool Abuse</em>.</li>
+            <li><strong>Select Target Agent:</strong> Pick the target agent (e.g. <code>FinanceAssistant-v2</code>) and target model (e.g. <code>gpt-4o</code>).</li>
+            <li><strong>Compare Mode:</strong> Click <span class="action-badge">◫ Compare Mode</span> to run an attack twice:
+              <ul style="margin-left: 20px; margin-top: 4px;">
+                <li><strong>Before:</strong> Demonstrates baseline unprotected agent vulnerability.</li>
+                <li><strong>After:</strong> Demonstrates real-time interception by ReedShield policy guardrails.</li>
+              </ul>
+            </li>
+            <li><strong>Run Simulation:</strong> Click <span class="action-badge">▶ Run Simulation</span> to observe step-by-step red-team probes in the live results terminal.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer-bar">
+      <span>End of User Journey Guide</span>
+      <span>ReedShield AI-SPM — Complete Operational Runbook</span>
+    </div>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,154 @@
+[
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-1",
+    "subcategory": "Annex 1.1 Inventory of business IT assets, including AI models and agents",
+    "cpm_control": "Model + agent registry, AI-BOM",
+    "evaluation_rule": "models_have_risk_tier"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-2",
+    "subcategory": "Annex 1.2 Preventing access of unauthorised software: unsanctioned AI SaaS detected",
+    "cpm_control": "Shadow AI discovery",
+    "evaluation_rule": "shadow_ai_policy_enforced"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-4",
+    "subcategory": "Annex 1.4 Secure configuration: AI asset drift monitored",
+    "cpm_control": "Posture snapshots",
+    "evaluation_rule": "snapshots_recent"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-5",
+    "subcategory": "Annex 1.5 Application security life cycle: AI code scanned before release",
+    "cpm_control": "Code Guardrails",
+    "evaluation_rule": "codeguard_scan_recent"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-6",
+    "subcategory": "Annex 1.6 Patch and vulnerability management: models scanned",
+    "cpm_control": "ModelScan",
+    "evaluation_rule": "model_security_scanner_reachable"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-7",
+    "subcategory": "Annex 1.7 User access control: least privilege for human and machine identities",
+    "cpm_control": "RBAC + machine identity register",
+    "evaluation_rule": "nhi_register_current"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-8",
+    "subcategory": "Annex 1.8 Authentication framework: strong credentials, rotation",
+    "cpm_control": "Keycloak + credential rotation",
+    "evaluation_rule": "integration_credentials_rotated"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-10",
+    "subcategory": "Annex 1.10 Vendor risk management: third-party AI components and licenses",
+    "cpm_control": "AI-BOM license policy",
+    "evaluation_rule": "bom_licenses_allowed"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-12",
+    "subcategory": "Annex 1.12 Advanced real-time threat defence and management",
+    "cpm_control": "Guard model + Flink CEP",
+    "evaluation_rule": "prometheus_reachable"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-14",
+    "subcategory": "Annex 1.14 Data leak prevention strategy",
+    "cpm_control": "Output guard",
+    "evaluation_rule": "pii_redaction_enabled"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-15",
+    "subcategory": "Annex 1.15 Maintenance, monitoring and analysis of audit logs",
+    "cpm_control": "Audit export",
+    "evaluation_rule": "audit_export_recent"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-16",
+    "subcategory": "Annex 1.16 Incident response and management",
+    "cpm_control": "Cases workflow",
+    "evaluation_rule": "incident_case_workflow"
+  },
+  {
+    "framework": "RBI",
+    "function": "CYBER_SECURITY_FRAMEWORK",
+    "category": "RBI-CSF-19",
+    "subcategory": "Annex 1.19 Forensics: decision traces retained per session",
+    "cpm_control": "Lineage + audit export",
+    "evaluation_rule": "audit_export_recent"
+  },
+  {
+    "framework": "RBI",
+    "function": "INCIDENT_REPORTING",
+    "category": "RBI-IR-6H",
+    "subcategory": "Cyber incident reporting to RBI within 6 hours: breach clock with a 6-hour window",
+    "cpm_control": "Breach clock",
+    "evaluation_rule": "breach_runbook_ready"
+  },
+  {
+    "framework": "RBI",
+    "function": "IT_GOVERNANCE_2023",
+    "category": "RBI-ITG-CH3",
+    "subcategory": "Master Direction 2023 Ch.III IT/IS risk management: risk register and posture scoring",
+    "cpm_control": "Posture risk fusion",
+    "evaluation_rule": "risk_fusion_active"
+  },
+  {
+    "framework": "RBI",
+    "function": "IT_GOVERNANCE_2023",
+    "category": "RBI-ITG-CH5",
+    "subcategory": "Master Direction 2023 Ch.V Information security: policy enforcement as code",
+    "cpm_control": "OPA bundles",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "RBI",
+    "function": "IT_GOVERNANCE_2023",
+    "category": "RBI-ITG-CH7",
+    "subcategory": "Master Direction 2023 Ch.VII IS audit: evidence exportable per control",
+    "cpm_control": "Compliance reports",
+    "evaluation_rule": "audit_export_recent"
+  },
+  {
+    "framework": "RBI",
+    "function": "DIGITAL_LENDING_2022",
+    "category": "RBI-DL-9",
+    "subcategory": "Digital Lending Guidelines 9 data privacy: consent-based collection, no PII leakage from AI",
+    "cpm_control": "DPDPA consent + output guard",
+    "evaluation_rule": "pii_redaction_enabled"
+  },
+  {
+    "framework": "RBI",
+    "function": "OUTSOURCING",
+    "category": "RBI-OUT-IT",
+    "subcategory": "IT outsourcing directions: AI processors and cross-border transfers registered",
+    "cpm_control": "Cross-border register",
+    "evaluation_rule": "bom_licenses_allowed"
+  }
+]

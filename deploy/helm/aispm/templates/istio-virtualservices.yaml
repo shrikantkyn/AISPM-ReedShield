@@ -1,0 +1,107 @@
+# deploy/helm/aispm/templates/istio-virtualservices.yaml
+# Routing mirrors the Vite dev proxy (vite.config.js) exactly:
+#   /api/spm/*  → spm-api:8092          strip /api/spm
+#   /api/v1/*   → agent-orchestrator:8094  NO rewrite (orchestrator mounts at /api/v1/...)
+#   /api/*      → api:8080              strip /api
+#   /ws/*       → api:8080              no rewrite (WebSocket)
+#   /*          → ui:3001
+{{- /* Istio is always installed by the bootstrap script — the previous     */}}
+{{- /* capability check (`.Capabilities.APIVersions.Has`) silently dropped   */}}
+{{- /* this template under `helm template` because --api-versions wasn't    */}}
+{{- /* passed for networking.istio.io. Guard kept only on ingress.enabled. */}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: aispm-ui
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  hosts:
+    - {{ .Values.ingress.host }}
+  gateways:
+    - aispm-gateway
+  http:
+    # /realms/* and /resources/* → Keycloak (token endpoint, JWKS, login assets)
+    # Must come before the /* catch-all so browser auth calls reach Keycloak.
+    - match:
+        - uri:
+            prefix: /realms/
+      route:
+        - destination:
+            host: keycloak
+            port:
+              number: 8080
+    - match:
+        - uri:
+            prefix: /resources/
+      route:
+        - destination:
+            host: keycloak
+            port:
+              number: 8080
+
+    # /api/spm/* → spm-api (SPM REST API, port 8092)
+    # Match /api/spm/ (trailing slash) so rewrite to / produces /path not //path
+    - match:
+        - uri:
+            prefix: /api/spm/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: spm-api
+            port:
+              number: 8092
+
+    # /api/v1/* → agent-orchestrator (port 8094) — NO rewrite, orchestrator owns /api/v1/...
+    - match:
+        - uri:
+            prefix: /api/v1/
+      route:
+        - destination:
+            host: agent-orchestrator
+            port:
+              number: 8094
+
+    # /api/* → CPM api (platform REST API, port 8080)
+    # Match /api/ (trailing slash) so rewrite to / produces /path not //path
+    # e.g. /api/dev-token → /dev-token, /api/chat → /chat
+    - match:
+        - uri:
+            prefix: /api/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: api
+            port:
+              number: 8080
+
+    # /ws/* → CPM api WebSocket — no rewrite, app expects /ws/... path
+    # timeout: 0s is required — Istio's default 15 s HTTP timeout kills
+    # long-lived WebSocket connections mid-stream.
+    - match:
+        - uri:
+            prefix: /ws
+      timeout: 3600s
+      route:
+        - destination:
+            host: api
+            port:
+              number: 8080
+
+    # /* → UI (React SPA, port 3001)
+    - match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: ui
+            port:
+              number: 3001
+{{- end }}

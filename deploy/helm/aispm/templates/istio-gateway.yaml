@@ -1,0 +1,52 @@
+# deploy/helm/aispm/templates/istio-gateway.yaml
+#
+# Istio is a hard requirement of this platform — the bootstrap script always
+# installs it. The previous `.Capabilities.APIVersions.Has` guard made this
+# template silently NOT render under `helm template` unless --api-versions
+# was passed for networking.istio.io, which the bootstrap script didn't do.
+# That's why the Istio Gateway / VirtualServices were silently missing from
+# the deployed chart for a long time. Guard kept only on `ingress.enabled`.
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: aispm-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    {{- if .Values.ingress.tls }}
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        # Bare-name reference: the istio-ingressgateway pod looks up
+        # `aispm-tls` in its OWN namespace (istio-system).  We render
+        # a second cert-manager Certificate in istio-system that
+        # populates this Secret — see cert-manager-certificate.yaml.
+        # We tried cross-namespace `aispm/aispm-tls` syntax but Istio
+        # 1.29+ doesn't permit it by default; SDS push silently times
+        # out and TLS handshakes get reset.
+        credentialName: {{ .Values.ingress.tlsSecretName }}
+      hosts:
+        - {{ .Values.ingress.host }}
+    {{- end }}
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - {{ .Values.ingress.host }}
+      {{- if .Values.ingress.httpsRedirect }}
+      tls:
+        httpsRedirect: true
+      {{- end }}
+{{- end }}

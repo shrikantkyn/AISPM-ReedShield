@@ -1,0 +1,49 @@
+# deploy/helm/aispm/templates/kafka-service.yaml
+# Headless service — gives each pod a stable DNS entry (kafka-0.kafka.aispm...)
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  clusterIP: None
+  # Publish DNS records for pods even before they pass readiness probes.
+  # KRaft brokers rely on these records (kafka-0.kafka..., kafka-1.kafka...)
+  # to find each other for the controller-quorum election BEFORE any of
+  # them can become Ready — without this, the kube-dns endpoint slice
+  # stays empty until a broker is Ready, which can never happen because
+  # readiness depends on the quorum forming. Bootstrap deadlock.
+  publishNotReadyAddresses: true
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+    - name: controller
+      port: 9093
+---
+# Named ClusterIP service — used by init containers (job wait-for-kafka)
+# that just need "any reachable broker", separate from the headless DNS
+# entries that KAFKA_BOOTSTRAP_SERVERS in the platform-env ConfigMap
+# (templated from .Values.kafka.replicas) lists for client auto-discovery.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-broker
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: kafka
+  ports:
+    - port: 9092
+      targetPort: 9092

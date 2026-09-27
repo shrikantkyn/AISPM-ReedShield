@@ -1,0 +1,23 @@
+# ReedShield — robots.txt
+# Public marketing pages are indexable; the authenticated product is not.
+
+User-agent: *
+Allow: /$
+Allow: /home
+Allow: /platform
+Allow: /ai-security
+Allow: /compliance
+Allow: /pricing
+Allow: /resources
+Allow: /security
+Allow: /get-started
+
+# Authenticated product surfaces and callbacks — keep out of the index.
+Disallow: /admin
+Disallow: /agent
+Disallow: /auth
+Disallow: /login
+Disallow: /signed-out
+Disallow: /api
+
+Sitemap: https://reedshield.io/sitemap.xml

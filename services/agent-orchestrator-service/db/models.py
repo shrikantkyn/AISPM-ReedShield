@@ -1,0 +1,207 @@
+"""
+db/models.py
+────────────
+SQLAlchemy ORM table definitions.
+
+Two tables:
+  agent_sessions  — one row per AI agent session
+  session_events  — lifecycle events emitted during a session
+
+Both are imported in alembic/env.py so autogenerate picks them up.
+"""
+from __future__ import annotations
+
+import uuid as _uuid_mod
+
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from db.base import Base
+
+
+class AgentSessionORM(Base):
+    """
+    Persistent record for one agent session.
+
+    Column naming note: the ORM column is named 'decision' (concise SQL-friendly
+    name) but maps to SessionRecord.policy_decision in the domain layer.
+    The mapping helper _orm_to_record() converts 'orm.decision' → 'policy_decision'
+    and the insert() method maps 'rec.policy_decision' → 'decision=...' explicitly.
+    This is intentional; do not rename without updating both sides.
+
+    JSON fields (tools, context, risk_signals) are stored as JSON-serialised strings
+    because SQLite has no native JSON column type.
+    """
+    __tablename__ = "agent_sessions"
+
+    id             = Column(String,               primary_key=True)
+    user_id        = Column(String,               nullable=False)
+    agent_id       = Column(String,               nullable=False)
+    tenant_id      = Column(String,               nullable=True)
+    status         = Column(String,               nullable=False)
+    risk_score     = Column(Float,                nullable=False)
+    decision       = Column(String,               nullable=False)   # maps to SessionRecord.policy_decision
+    # ── Extended metadata ─────────────────────────────────────────────
+    prompt_hash    = Column(String,               nullable=False)
+    risk_tier      = Column(String,               nullable=False)
+    risk_signals   = Column(Text,                 nullable=False)   # JSON array
+    tools          = Column(Text,                 nullable=False)   # JSON array
+    context        = Column(Text,                 nullable=False)   # JSON object
+    policy_reason  = Column(String,               nullable=False)
+    policy_version = Column(String,               nullable=False)
+    trace_id       = Column(String,               nullable=False)
+    created_at     = Column(DateTime(timezone=True), nullable=False)
+    updated_at     = Column(DateTime(timezone=True), nullable=False)
+
+    events = relationship(
+        "SessionEventORM",
+        back_populates="session",
+        lazy="select",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_agent_sessions_user_id",   "user_id"),
+        Index("ix_agent_sessions_agent_id",  "agent_id"),
+        Index("ix_agent_sessions_tenant_id", "tenant_id"),
+    )
+
+
+class SessionEventORM(Base):
+    """
+    One row per lifecycle event emitted during a session.
+    payload is a JSON string (the event's domain payload dict).
+    """
+    __tablename__ = "session_events"
+
+    id         = Column(String,               primary_key=True)
+    session_id = Column(
+        String,
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_type = Column(String,               nullable=False)
+    payload    = Column(Text,                 nullable=False)   # JSON string
+    timestamp  = Column(DateTime(timezone=True), nullable=False)
+
+    session = relationship("AgentSessionORM", back_populates="events")
+
+    __table_args__ = (
+        Index("ix_session_events_session_id", "session_id"),
+        Index("ix_session_events_event_type", "event_type"),
+    )
+
+
+class CaseORM(Base):
+    """
+    Persistent record for one escalated AI security case.
+    Replaces the former in-memory dict in CasesService.
+    """
+    __tablename__ = "agent_cases"
+
+    case_id    = Column(String,               primary_key=True)
+    session_id = Column(String,               nullable=False)
+    reason     = Column(String,               nullable=False)
+    summary    = Column(Text,                 nullable=False)
+    risk_score = Column(Float,                nullable=False)
+    decision   = Column(String,               nullable=False)
+    status     = Column(String,               nullable=False, default="open")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_agent_cases_session_id", "session_id"),
+        Index("ix_agent_cases_created_at", "created_at"),
+    )
+
+
+class ThreatFindingORM(Base):
+    """Persisted finding from the threat-hunting-agent."""
+    __tablename__ = "threat_findings"
+
+    id          = Column(String, primary_key=True)
+    batch_hash  = Column(String, nullable=False, unique=True)
+    title       = Column(String, nullable=False)
+    severity    = Column(String, nullable=False)   # low|medium|high|critical
+    description = Column(Text,   nullable=False)
+    evidence    = Column(Text,   nullable=False)   # JSON list
+    ttps        = Column(Text,   nullable=False, default="[]")  # JSON array
+    tenant_id   = Column(String, nullable=False)
+    status      = Column(String, nullable=False, default="open")
+    created_at  = Column(String, nullable=False)  # ISO-8601 string
+    closed_at   = Column(String, nullable=True)
+
+    # ── New fields (all nullable for backward compat) ─────────────────
+    timestamp           = Column(String,  nullable=True)   # Finding.timestamp (UTC ISO)
+    confidence          = Column(Float,   nullable=True)
+    risk_score          = Column(Float,   nullable=True)
+    hypothesis          = Column(Text,    nullable=True)
+    asset               = Column(String,  nullable=True)
+    environment         = Column(String,  nullable=True)
+    correlated_events   = Column(Text,    nullable=True)   # JSON list
+    correlated_findings = Column(Text,    nullable=True)   # JSON list
+    triggered_policies  = Column(Text,    nullable=True)   # JSON list
+    policy_signals      = Column(Text,    nullable=True)   # JSON list of dicts
+    recommended_actions = Column(Text,    nullable=True)   # JSON list
+    should_open_case    = Column(Boolean, nullable=True)
+    case_id             = Column(String,  nullable=True)
+    source              = Column(String,  nullable=True)
+    updated_at          = Column(String,  nullable=True)
+    is_proactive        = Column(Boolean, nullable=True, default=False)
+
+    # ── Prioritization fields (all nullable — added via incremental migration) ─
+    dedup_key        = Column(String,   nullable=True, index=True)
+    occurrence_count = Column(Integer,  nullable=True)
+    first_seen       = Column(String,   nullable=True)   # ISO-8601
+    last_seen        = Column(String,   nullable=True)   # ISO-8601
+    group_id         = Column(String,   nullable=True)
+    group_size       = Column(Integer,  nullable=True)
+    priority_score   = Column(Float,    nullable=True)
+    suppressed       = Column(Boolean,  nullable=True, default=False)
+
+    __table_args__ = (
+        Index("ix_threat_findings_tenant",   "tenant_id", "created_at"),
+        Index("ix_threat_findings_severity", "severity",  "status"),
+        Index("ix_threat_findings_priority", "priority_score"),
+        Index("ix_threat_findings_dedup",    "dedup_key"),
+    )
+
+
+class AuditAlertORM(Base):
+    """
+    Security events routed from Kafka (cpm.<tenant>.audit topic) that meet
+    the severity threshold (warning | critical).  Consumed by
+    audit_alert_consumer.py and exposed via GET /api/v1/alerts so the
+    Alerts page can display them alongside threat_findings.
+    """
+    __tablename__ = "audit_alerts"
+
+    id         = Column(UUID(as_uuid=True), primary_key=True, default=_uuid_mod.uuid4)
+    event_type = Column(String(128), nullable=False)
+    severity   = Column(String(32),  nullable=False)   # "warning" | "critical"
+    component  = Column(String(128))                   # source service
+    principal  = Column(String(255))                   # user_id from JWT
+    session_id = Column(String(255))
+    tenant_id  = Column(String(128), nullable=False)
+    details    = Column(Text, default="{}")            # JSON string
+    status     = Column(String(32), default="new")     # new | acknowledged | suppressed
+    ts         = Column(DateTime(timezone=True))       # event timestamp from payload
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_audit_alerts_tenant",   "tenant_id", "created_at"),
+        Index("ix_audit_alerts_severity", "severity",  "status"),
+        UniqueConstraint("event_type", "session_id", "ts", name="uq_audit_alert_dedup"),
+    )

@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# deploy/scripts/kind-databases-ha.sh
+# ─────────────────────────────────────────────────────────────────────────
+# Install Postgres + Redis as HA stateful workloads BEFORE running the
+# AISPM bootstrap. Replaces the chart's single-pod spm-db / redis
+# StatefulSets.
+#
+# What gets installed:
+#
+#   1. CloudNativePG operator + a 3-instance Postgres Cluster.
+#      - 1 primary + 2 hot-standby replicas, streaming replication.
+#      - PVCs use the default StorageClass (Longhorn after kind-storage.sh).
+#      - Operator handles failover automatically: if the primary's pod
+#        dies, a standby gets promoted within ~10s.
+#      - Connection endpoints (Services that the operator manages):
+#          spm-db-rw  — read/write, always points at the current primary
+#          spm-db-r   — read-only, any replica
+#          spm-db-ro  — read-only, replicas only (excludes primary)
+#      - Pre-creates the `spm` database and `spm_rw` superuser with the
+#        password we already use in platform-secrets.
+#
+#   2. Bitnami Redis chart in replication + Sentinel mode.
+#      - 1 master + 2 replicas + 3 sentinels (sidecars on each Redis pod).
+#      - Sentinels monitor the master and elect a new one on failure.
+#      - Connection: clients use the Sentinel-aware service `redis`
+#        which proxies to the current master.
+#
+# After this script:
+#   - Set spmDb.enabled=false and redis.enabled=false in values.dev-multinode.yaml
+#     so the chart's built-in single-pod versions are skipped.
+#   - Override SPM_DB_URL / SPM_DB_URL_ASYNC / REDIS_URL via platformEnv.
+#
+# Subcommands:
+#   up      Install CNPG + Postgres cluster + Redis HA. Idempotent.
+#   status  Show CNPG cluster + Redis sentinel status.
+#   down    Uninstall both (DESTROYS data).
+# ─────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+CNPG_VERSION="${CNPG_VERSION:-1.24.1}"
+PG_NAMESPACE="${PG_NAMESPACE:-aispm}"
+PG_CLUSTER_NAME="${PG_CLUSTER_NAME:-spm-db}"
+PG_INSTANCES="${PG_INSTANCES:-3}"
+PG_DB_NAME="${PG_DB_NAME:-spm}"
+PG_DB_OWNER="${PG_DB_OWNER:-spm_rw}"
+PG_DB_PASSWORD="${PG_DB_PASSWORD:-spmpass}"
+PG_STORAGE_SIZE="${PG_STORAGE_SIZE:-2Gi}"
+PG_STORAGE_CLASS="${PG_STORAGE_CLASS:-standard}"   # kind's local-path
+
+REDIS_NAMESPACE="${REDIS_NAMESPACE:-aispm}"
+REDIS_CHART_VERSION="${REDIS_CHART_VERSION:-20.13.4}"
+REDIS_PASSWORD="${REDIS_PASSWORD:-}"       # empty = no auth (dev)
+
+_log()  { printf '\033[1;36m▶ %s\033[0m\n' "$*"; }
+_warn() { printf '\033[1;33m! %s\033[0m\n' "$*"; }
+
+# ── 1. CloudNativePG operator + Postgres cluster ────────────────────────
+
+_install_cnpg_operator() {
+  _log "installing CloudNativePG operator ${CNPG_VERSION}"
+  kubectl apply --server-side --force-conflicts \
+    -f "https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-${CNPG_VERSION%.*}/releases/cnpg-${CNPG_VERSION}.yaml" \
+    >/dev/null
+
+  _log "  waiting for CNPG operator to be Ready..."
+  kubectl -n cnpg-system wait --for=condition=Available deploy/cnpg-controller-manager --timeout=180s
+}
+
+_create_pg_cluster() {
+  _log "creating Postgres cluster ${PG_CLUSTER_NAME} (${PG_INSTANCES} instances) in ${PG_NAMESPACE}"
+  kubectl get namespace "$PG_NAMESPACE" >/dev/null 2>&1 || \
+    kubectl create namespace "$PG_NAMESPACE"
+
+  # Auth secret consumed by the Cluster spec. The bootstrap.initdb.owner
+  # below uses this credential.
+  kubectl -n "$PG_NAMESPACE" create secret generic "${PG_CLUSTER_NAME}-app" \
+    --from-literal=username="$PG_DB_OWNER" \
+    --from-literal=password="$PG_DB_PASSWORD" \
+    --type=kubernetes.io/basic-auth \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  # CNPG Cluster CR. The operator creates:
+  #   - <name>-1, -2, -3 pods (StatefulSet behind the scenes)
+  #   - Service <name>-rw  → primary
+  #   - Service <name>-r   → any (round-robin)
+  #   - Service <name>-ro  → replicas only
+  local sc_clause=""
+  [ -n "$PG_STORAGE_CLASS" ] && sc_clause="storageClass: ${PG_STORAGE_CLASS}"
+
+  cat <<EOF | kubectl apply -f -
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: ${PG_CLUSTER_NAME}
+  namespace: ${PG_NAMESPACE}
+spec:
+  instances: ${PG_INSTANCES}
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4-bookworm
+
+  # ── Stay out of the Istio mesh ──────────────────────────────────────────
+  # CNPG instances pass labels/annotations declared here through to the
+  # generated Pods.  We use that to disable Istio sidecar injection on
+  # every Postgres instance.
+  #
+  # Why: Istio rewrites kubelet probes to route through pilot-agent, then
+  # proxies them to the actual app port (here :8000 — CNPG's
+  # instance-manager health endpoint).  Under any kind of pressure
+  # (containerd restart cascade, replica catch-up, OOM) instance-manager
+  # answers slowly, the rewritten probe times out, kubelet kills the pod,
+  # CNPG restarts it, repeat.  Observed 2026-05-02 — 96 restarts on
+  # spm-db-1 in 43h.
+  #
+  # CNPG already does its own internal mTLS between primary and standbys
+  # for replication, and apps reach Postgres via plain SQL/TCP through
+  # the read-write service.  Mesh mTLS adds nothing here.  Apps stay in
+  # the mesh and reach the rw/ro/r services fine — only the Postgres
+  # instance pods themselves are exempt.
+  inheritedMetadata:
+    annotations:
+      sidecar.istio.io/inject: "false"
+
+  # Spread instances across nodes so a node loss only takes one Postgres
+  # replica down. Required topology spread, not preferred — we have 3
+  # nodes and 3 instances so this fits exactly.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          cnpg.io/cluster: ${PG_CLUSTER_NAME}
+
+  bootstrap:
+    initdb:
+      database: ${PG_DB_NAME}
+      owner: ${PG_DB_OWNER}
+      secret:
+        name: ${PG_CLUSTER_NAME}-app
+
+  storage:
+    size: ${PG_STORAGE_SIZE}
+    ${sc_clause}
+
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "256MB"
+      # Replication tuning — pulled from CNPG's recommended defaults.
+      max_wal_size: "1GB"
+      wal_keep_size: "512MB"
+
+  # Failover behavior:
+  #
+  # - failoverDelay: time (seconds) CNPG waits after detecting the
+  #   primary is unhealthy before promoting a standby.  Default is 0
+  #   (immediate), which on this kind cluster causes a runaway
+  #   ping-pong failover loop:
+  #     · CNPG instance-manager :8000 status port (TLS) intermittently
+  #       returns EOF / "tls: unrecognized name" / context-deadline
+  #       under Docker daemon CPU pressure or WAL replay bursts
+  #     · Each transient probe failure → immediate failover →
+  #       new WAL timeline → former primary stranded on a dead timeline
+  #     · After ~5 forks pg_rewind cannot bridge the divergence and
+  #       the stranded replica goes into permanent CrashLoopBackOff
+  #   Observed May 2026: 9-hour storm, replica stranded at TL21 vs
+  #   TL42 primary, required full re-clone via pg_basebackup.
+  #   60s absorbs every probe blip we've ever seen here while still
+  #   reacting to a real primary outage well within typical RTO.
+  #   See runbook §"CNPG failover storm + WAL timeline divergence".
+  failoverDelay: 60
+  #
+  # - primaryUpdateStrategy/primaryUpdateMethod control PLANNED updates
+  #   (minor pg version bump, pod template change), not failure-driven
+  #   failover.  unsupervised + switchover = CNPG can auto-promote a
+  #   standby during such updates via clean handoff, no manual
+  #   `kubectl cnpg promote` required.
+  primaryUpdateStrategy: unsupervised
+  primaryUpdateMethod: switchover
+
+  monitoring:
+    enablePodMonitor: false
+EOF
+
+  _log "  waiting for Postgres cluster to be healthy (~2-3 min)..."
+  local ready instances
+  for i in $(seq 1 60); do
+    ready=$(kubectl -n "$PG_NAMESPACE" get cluster "$PG_CLUSTER_NAME" \
+              -o jsonpath='{.status.readyInstances}' 2>/dev/null || echo 0)
+    instances=$(kubectl -n "$PG_NAMESPACE" get cluster "$PG_CLUSTER_NAME" \
+                  -o jsonpath='{.status.instances}' 2>/dev/null || echo 0)
+    if [ "${ready:-0}" -ge "$PG_INSTANCES" ]; then
+      _log "  ✓ ${ready}/${instances} Postgres instances Ready"
+      _grant_createrole_to_app_user
+      return 0
+    fi
+    printf '\r    waiting (%s/60) — %s/%s Ready... ' "$i" "${ready:-0}" "${instances:-0}"
+    sleep 10
+  done
+  _warn "Postgres cluster didn't reach ${PG_INSTANCES} Ready in 10 min"
+}
+
+# ── Grant CREATEROLE to the application user ─────────────────────────────
+# Alembic migration 003 (and a couple later) does
+#   `CREATE ROLE spm_ro NOLOGIN;` to provision a read-only role.  This
+# fails with `permission denied to create role` if the connecting user
+# (spm_rw, the CNPG-provisioned app owner) doesn't have the CREATEROLE
+# attribute.  CNPG creates app users without it by default.
+#
+# We grant CREATEROLE here, AFTER the cluster is Ready, BEFORE bootstrap
+# runs db-seed.  This keeps the privilege scope narrow (only the app
+# user has it; nothing else needs it).  Documented incident: May 2026
+# — db-seed silently failed in CrashLoop for hours because alembic
+# crashed mid-migration without logging the actual permission error.
+_grant_createrole_to_app_user() {
+  _log "  granting CREATEROLE to ${PG_DB_OWNER} (required by alembic migration 003+)"
+  local primary
+  primary=$(kubectl -n "$PG_NAMESPACE" get cluster "$PG_CLUSTER_NAME" \
+              -o jsonpath='{.status.currentPrimary}' 2>/dev/null)
+  if [ -z "$primary" ]; then
+    _warn "  could not find currentPrimary — skipping CREATEROLE grant."
+    _warn "  Migrations will fail until you run:"
+    _warn "    kubectl -n ${PG_NAMESPACE} exec <primary-pod> -c postgres -- psql -U postgres -c 'ALTER USER ${PG_DB_OWNER} CREATEROLE;'"
+    return 0
+  fi
+  if kubectl -n "$PG_NAMESPACE" exec "$primary" -c postgres -- \
+       psql -U postgres -d "$PG_DB_NAME" -c "ALTER USER ${PG_DB_OWNER} CREATEROLE;" \
+       >/dev/null 2>&1; then
+    _log "  ✓ CREATEROLE granted to ${PG_DB_OWNER} on ${primary}"
+  else
+    _warn "  ALTER USER … CREATEROLE failed (non-fatal but migrations may break)"
+  fi
+}
+
+# ── 2. Bitnami Redis with Sentinel ──────────────────────────────────────
+
+_install_redis_ha() {
+  _log "installing Bitnami Redis ${REDIS_CHART_VERSION} (replication + sentinel)"
+  helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
+  helm repo update bitnami >/dev/null
+
+  kubectl get namespace "$REDIS_NAMESPACE" >/dev/null 2>&1 || \
+    kubectl create namespace "$REDIS_NAMESPACE"
+
+  # Auth disabled by default for dev simplicity. Set REDIS_PASSWORD env
+  # to enable. With sentinel.enabled=true the chart deploys:
+  #   - StatefulSet `redis-node` with N replicas (each pod runs both
+  #     redis-server and redis-sentinel containers)
+  #   - Headless Service for sentinel discovery
+  #   - Regular Service `redis` that exposes BOTH the redis port (6379)
+  #     and the sentinel port (26379). Clients that speak the sentinel
+  #     protocol find the current master via 26379.
+  local auth_set="--set auth.enabled=false"
+  [ -n "$REDIS_PASSWORD" ] && auth_set="--set auth.password=${REDIS_PASSWORD}"
+
+  # Bitnami moved many public tags from `bitnami/*` to `bitnamilegacy/*`
+  # in late 2025 as part of their image-licensing changes. Override
+  # both the redis image and the sentinel image so we pull from the
+  # still-public legacy namespace.
+  helm upgrade --install redis bitnami/redis \
+    --namespace "$REDIS_NAMESPACE" \
+    --version "$REDIS_CHART_VERSION" \
+    --set global.defaultFips=false \
+    --set architecture=replication \
+    --set sentinel.enabled=true \
+    --set sentinel.quorum=2 \
+    --set replica.replicaCount=3 \
+    $auth_set \
+    --set global.security.allowInsecureImages=true \
+    --set image.repository=bitnamilegacy/redis \
+    --set sentinel.image.repository=bitnamilegacy/redis-sentinel \
+    --set master.persistence.enabled=true \
+    --set master.persistence.size=2Gi \
+    --set master.persistence.storageClass=standard \
+    --set replica.persistence.enabled=true \
+    --set replica.persistence.size=2Gi \
+    --set replica.persistence.storageClass=standard \
+    \
+    `# ── Probe-timeout overrides (sentinel container) ─────────────────` \
+    `# The Bitnami chart defaults timeoutSeconds to 1 on the sentinel`    \
+    `# liveness/readiness exec probes (/health/ping_sentinel.sh).  That` \
+    `# probe forks bash + redis-cli inside the script, which under any`  \
+    `# CPU contention exceeds 1s and trips kubelet's failureThreshold.`  \
+    `# Same class of footgun as the Kafka kafka-broker-api-versions`     \
+    `# probe we lengthened earlier (5s now).  Observed 2026-05-02:`      \
+    `# redis-node-{0,1,2} sentinel containers at 18 / 9 / 13 cumulative` \
+    `# restarts over 44h — masked real degradations and noised up`       \
+    `# incident review.  5s gives bash room to breathe; real sentinel`   \
+    `# hangs still trip failureThreshold.`                               \
+    --set sentinel.livenessProbe.timeoutSeconds=5 \
+    --set sentinel.readinessProbe.timeoutSeconds=5 \
+    `# Mirror the same fix on the redis-server container — its probe is` \
+    `# also a shell exec (/health/ping_liveness_local.sh) with the same` \
+    `# 1s default.`                                                     \
+    --set master.livenessProbe.timeoutSeconds=5 \
+    --set master.readinessProbe.timeoutSeconds=5 \
+    --set replica.livenessProbe.timeoutSeconds=5 \
+    --set replica.readinessProbe.timeoutSeconds=5 \
+    \
+    `# ── Resource limits — prevent node-level OOMKill cascade ────────────` \
+    `# Without limits the kernel silently kills sentinel containers when`   \
+    `# the node runs low on memory, breaking quorum and cascading into`     \
+    `# spm-api / keycloak crashes. Sentinel is a tiny coordinator process` \
+    `# (< 10 MB RSS in practice); 128Mi is a very generous cap.`           \
+    --set sentinel.resources.requests.memory=64Mi \
+    --set sentinel.resources.limits.memory=128Mi \
+    --set sentinel.resources.requests.cpu=10m \
+    --set sentinel.resources.limits.cpu=100m \
+    --set replica.resources.requests.memory=128Mi \
+    --set replica.resources.limits.memory=384Mi \
+    --set replica.resources.requests.cpu=50m \
+    --set replica.resources.limits.cpu=300m \
+    --wait --timeout=10m
+
+  _log "  ✓ Redis HA Ready (1 master + 3 replicas + 3 sentinels)"
+
+  # ── No master proxy: clients use Sentinel directly ───────────────────
+  # Earlier versions deployed an HAProxy `redis-master-proxy` Deployment
+  # + `redis-master` Service that probed `INFO replication` against each
+  # redis-node and forwarded to whichever returned `role:master`. The
+  # 1-second tcp-check cycle interacted badly with istio sidecar
+  # connection pooling — backends flapped UP/DOWN with ECONNRESET at
+  # PING, causing chat-path 500s. Rather than tune the haproxy check
+  # interval (workaround), we moved master discovery into the
+  # application clients via Redis Sentinel. See
+  # platform_shared/redis.py:get_redis_client() — every service builds
+  # its client through that helper, which uses redis.sentinel.Sentinel
+  # to discover the current master from REDIS_SENTINEL_HOSTS exposed by
+  # configmap-platform-env.yaml. Failover is transparent at the client
+  # layer; no proxy needed.
+}
+
+# ── Subcommands ─────────────────────────────────────────────────────────
+
+cmd_up() {
+  command -v helm    >/dev/null 2>&1 || { echo "helm is required" >&2; exit 1; }
+  command -v kubectl >/dev/null 2>&1 || { echo "kubectl is required" >&2; exit 1; }
+
+  _install_cnpg_operator
+  _create_pg_cluster
+  _install_redis_ha
+
+  echo
+  _log "HA databases ready. AISPM should connect to:"
+  echo
+  echo "  Postgres (read-write, follows primary on failover):"
+  echo "    SPM_DB_URL=postgresql://${PG_DB_OWNER}:${PG_DB_PASSWORD}@${PG_CLUSTER_NAME}-rw.${PG_NAMESPACE}.svc.cluster.local:5432/${PG_DB_NAME}"
+  echo "    SPM_DB_URL_ASYNC=postgresql+asyncpg://${PG_DB_OWNER}:${PG_DB_PASSWORD}@${PG_CLUSTER_NAME}-rw.${PG_NAMESPACE}.svc.cluster.local:5432/${PG_DB_NAME}"
+  echo
+  echo "  Redis (Sentinel-aware service):"
+  echo "    REDIS_URL=redis://redis.${REDIS_NAMESPACE}.svc.cluster.local:6379"
+  echo "    SENTINEL_URL=redis://redis.${REDIS_NAMESPACE}.svc.cluster.local:26379"
+  echo
+  echo "  Next step: run deploy/scripts/bootstrap-cluster.sh"
+  echo "  (the chart no longer ships built-in spm-db / redis StatefulSets;"
+  echo "   the spm-db ExternalName Service points at spm-db-rw,"
+  echo "   the values.dev-multinode.yaml overrides REDIS_URL/SENTINEL.)"
+}
+
+cmd_status() {
+  _log "Postgres cluster:"
+  kubectl -n "$PG_NAMESPACE" get cluster "$PG_CLUSTER_NAME" 2>&1
+  echo
+  kubectl -n "$PG_NAMESPACE" get pods -l "cnpg.io/cluster=${PG_CLUSTER_NAME}" -o wide 2>&1
+  echo
+  _log "Redis HA pods:"
+  kubectl -n "$REDIS_NAMESPACE" get pods -l app.kubernetes.io/name=redis -o wide 2>&1
+  echo
+  _log "Sentinel master info:"
+  kubectl -n "$REDIS_NAMESPACE" exec redis-node-0 -c sentinel -- \
+    redis-cli -p 26379 sentinel get-master-addr-by-name mymaster 2>&1 || true
+}
+
+cmd_down() {
+  read -rp "⚠️  uninstall CNPG + Redis HA and DESTROY all data? [y/N] " ans
+  [[ "$ans" =~ ^[Yy]$ ]] || { echo "aborted"; exit 0; }
+
+  kubectl -n "$PG_NAMESPACE" delete cluster "$PG_CLUSTER_NAME" --ignore-not-found
+  kubectl -n "$PG_NAMESPACE" delete pvc -l "cnpg.io/cluster=${PG_CLUSTER_NAME}" --ignore-not-found
+  kubectl delete -f \
+    "https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-${CNPG_VERSION%.*}/releases/cnpg-${CNPG_VERSION}.yaml" \
+    --ignore-not-found 2>/dev/null || true
+
+  helm uninstall redis -n "$REDIS_NAMESPACE" 2>/dev/null || true
+  kubectl -n "$REDIS_NAMESPACE" delete pvc -l app.kubernetes.io/name=redis --ignore-not-found
+}
+
+case "${1:-}" in
+  up)     cmd_up ;;
+  status) cmd_status ;;
+  down)   cmd_down ;;
+  *) echo "usage: $0 {up|status|down}" >&2; exit 1 ;;
+esac

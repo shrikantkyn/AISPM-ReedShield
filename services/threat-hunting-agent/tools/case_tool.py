@@ -1,0 +1,289 @@
+"""
+tools/case_tool.py
+───────────────────
+LangChain-compatible tools for case management in the orchestrator.
+
+create_case  — POST /api/v1/cases/hunt  (direct, no real session needed)
+
+An httpx-based HTTP client is used; in tests the module-level
+`_http_client` is patched with a fake.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, List, Optional
+
+import os
+import time
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Keycloak service-account token (Resource Owner Password flow)
+# ---------------------------------------------------------------------------
+
+_KEYCLOAK_URL  = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
+_KC_REALM      = os.environ.get("KEYCLOAK_REALM", "aispm")
+_KC_CLIENT_ID  = os.environ.get("KC_CLIENT_ID", "aispm-ui")
+_SERVICE_USER  = os.environ.get("SERVICE_ACCOUNT_USER", "admin@aispm.local")
+_SERVICE_PASS  = os.environ.get("SERVICE_ACCOUNT_PASSWORD", "admin-changeme")
+
+_cached_token: dict = {}
+
+
+def _fetch_service_token() -> str:
+    """Fetch a Keycloak access token for the threat-hunting-agent service account."""
+    global _cached_token
+    now = time.time()
+    if _cached_token.get("token") and now < _cached_token.get("expires_at", 0) - 30:
+        return _cached_token["token"]
+
+    url = f"{_KEYCLOAK_URL}/realms/{_KC_REALM}/protocol/openid-connect/token"
+    resp = httpx.post(url, data={
+        "grant_type": "password",
+        "client_id":  _KC_CLIENT_ID,
+        "username":   _SERVICE_USER,
+        "password":   _SERVICE_PASS,
+    }, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    _cached_token = {
+        "token":      data["access_token"],
+        "expires_at": now + data.get("expires_in", 300),
+    }
+    return _cached_token["token"]
+
+# ---------------------------------------------------------------------------
+# Runtime config — set at startup via configure()
+# ---------------------------------------------------------------------------
+
+_platform_api_url: str = "http://api:8080"
+_orchestrator_url: str = "http://agent-orchestrator:8094"
+_timeout: float = 10.0
+_http_client: Optional[httpx.Client] = None  # injected in tests
+
+
+def configure(platform_api_url: str, orchestrator_url: str, timeout: float = 10.0) -> None:
+    """Set target URLs at service startup."""
+    global _platform_api_url, _orchestrator_url, _timeout
+    _platform_api_url = platform_api_url
+    _orchestrator_url = orchestrator_url
+    _timeout = timeout
+
+
+def set_http_client(client: Any) -> None:
+    """Inject a mock httpx.Client for tests."""
+    global _http_client
+    _http_client = client
+
+
+def _get_client() -> httpx.Client:
+    if _http_client is not None:
+        return _http_client
+    return httpx.Client(timeout=_timeout)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+# Tool: create_case
+# ---------------------------------------------------------------------------
+
+def create_case(
+    title: str,
+    severity: str,
+    description: str,
+    reason: str = "",
+    tenant_id: str = "default",
+    ttps: Optional[List[str]] = None,
+) -> str:
+    """
+    Create a case directly in the orchestrator (no real session required).
+
+    Fetches a Keycloak service token automatically, then POSTs to /api/v1/cases/hunt.
+    The case appears immediately in the Cases tab with the exact title and
+    description provided — no generic placeholder text.
+
+    Args:
+        title:       Short descriptive title shown as the case heading.
+        severity:    One of 'low', 'medium', 'high', 'critical'.
+        description: Full narrative description of the threat.
+        reason:      Brief tag shown under the case ID (e.g. 'prompt-injection').
+        tenant_id:   Tenant to scope the case to.
+        ttps:        Optional MITRE ATT&CK / ATLAS technique IDs.
+
+    Returns:
+        JSON with keys: case_id, summary, severity, status, created_at.
+    """
+    if severity not in ("low", "medium", "high", "critical"):
+        return json.dumps({"error": f"Invalid severity '{severity}'. Must be low/medium/high/critical."})
+
+    try:
+        token = _fetch_service_token()
+    except Exception as exc:
+        logger.exception("Failed to fetch service token: %s", exc)
+        return json.dumps({"error": f"auth failure: {exc}"})
+
+    payload = {
+        "title": title,
+        "severity": severity,
+        "description": description,
+        "reason": reason,
+        "tenant_id": tenant_id,
+        "ttps": ttps or [],
+    }
+
+    try:
+        client = _get_client()
+        resp = client.post(
+            f"{_orchestrator_url}/api/v1/cases/hunt",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        return json.dumps(resp.json())
+    except httpx.HTTPStatusError as exc:
+        logger.error("create_case HTTP %d: %s", exc.response.status_code, exc.response.text)
+        return json.dumps({"error": f"HTTP {exc.response.status_code}: {exc.response.text}"})
+    except Exception as exc:
+        logger.exception("create_case failed: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Deduplication helper
+# ---------------------------------------------------------------------------
+
+def _compute_batch_hash(tenant_id: str, title: str, evidence: dict) -> str:
+    """
+    Deterministic SHA-256 hash used for server-side deduplication.
+
+    Inputs are sorted before serialisation so key order doesn't affect output.
+    """
+    import hashlib
+    canonical = json.dumps(
+        {"tenant_id": tenant_id, "title": title, "evidence": evidence},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Tool: create_threat_finding  (structured, deduplicated)
+# ---------------------------------------------------------------------------
+
+def create_threat_finding(
+    tenant_id: str,
+    title: str,
+    severity: str,
+    description: str,
+    evidence: dict,
+    ttps: Optional[List[str]] = None,
+    # ── New optional fields (all from Finding) ────────────────────────
+    timestamp: Optional[str] = None,
+    confidence: Optional[float] = None,
+    risk_score: Optional[float] = None,
+    hypothesis: Optional[str] = None,
+    asset: Optional[str] = None,
+    environment: Optional[str] = None,
+    correlated_events: Optional[List[str]] = None,
+    correlated_findings: Optional[List[str]] = None,
+    triggered_policies: Optional[List[str]] = None,
+    policy_signals: Optional[List[dict]] = None,
+    recommended_actions: Optional[List[str]] = None,
+    should_open_case: bool = False,
+    source: Optional[str] = None,
+) -> str:
+    """
+    Submit a structured threat finding to the orchestrator.
+
+    POSTs to /api/v1/threat-findings.  The server handles deduplication via
+    batch_hash: a 200 response means the finding already exists (deduplicated=True);
+    a 201 means it was newly created (deduplicated=False).
+
+    Args:
+        tenant_id:   Tenant scope.
+        title:       Short descriptive title.
+        severity:    One of 'low', 'medium', 'high', 'critical'.
+        description: Narrative explanation from the agent.
+        evidence:    Dict of supporting evidence facts.
+        ttps:        Optional MITRE ATT&CK / ATLAS technique IDs.
+        timestamp:   Optional timestamp of the finding.
+        confidence:  Optional confidence score (0.0-1.0).
+        risk_score:  Optional risk score (0.0-1.0).
+        hypothesis:  Optional threat hypothesis.
+        asset:       Optional affected asset identifier.
+        environment: Optional environment (e.g., 'prod', 'staging').
+        correlated_events: Optional list of correlated event IDs.
+        correlated_findings: Optional list of correlated finding IDs.
+        triggered_policies: Optional list of triggered policy IDs.
+        policy_signals: Optional list of policy signal details.
+        recommended_actions: Optional list of recommended remediation actions.
+        should_open_case: Whether to automatically open a case for this finding.
+        source: Optional source identifier (defaults to 'threat-hunting-agent').
+
+    Returns:
+        JSON string with keys: id, title, severity, status, created_at, deduplicated.
+    """
+    if severity not in ("low", "medium", "high", "critical"):
+        return json.dumps({"error": f"Invalid severity '{severity}'. Must be low/medium/high/critical."})
+
+    try:
+        token = _fetch_service_token()
+    except Exception as exc:
+        logger.exception("create_threat_finding: service token fetch failed: %s", exc)
+        return json.dumps({"error": f"auth failure: {exc}"})
+
+    batch_hash = _compute_batch_hash(tenant_id, title, evidence)
+    payload = {
+        "title":       title,
+        "severity":    severity,
+        "description": description,
+        "evidence":    evidence,
+        "tenant_id":   tenant_id,
+        "ttps":        ttps or [],
+        "batch_hash":  batch_hash,
+        # New fields
+        "timestamp":   timestamp,
+        "confidence":  confidence,
+        "risk_score":  risk_score,
+        "hypothesis":  hypothesis,
+        "asset":       asset,
+        "environment": environment,
+        "correlated_events":    correlated_events,
+        "correlated_findings":  correlated_findings,
+        "triggered_policies":   triggered_policies,
+        "policy_signals":       policy_signals,
+        "recommended_actions":  recommended_actions,
+        "should_open_case":     should_open_case,
+        "source":               source or "threat-hunting-agent",
+    }
+    # Remove None values to keep payload clean
+    payload = {k: v for k, v in payload.items() if v is not None}
+
+    try:
+        client = _get_client()
+        resp = client.post(
+            f"{_orchestrator_url}/api/v1/threat-findings",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        return json.dumps(resp.json())
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "create_threat_finding HTTP %d: %s",
+            exc.response.status_code, exc.response.text,
+        )
+        return json.dumps({"error": f"HTTP {exc.response.status_code}: {exc.response.text}"})
+    except Exception as exc:
+        logger.exception("create_threat_finding failed: %s", exc)
+        return json.dumps({"error": str(exc)})

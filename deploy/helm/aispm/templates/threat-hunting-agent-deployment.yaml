@@ -1,0 +1,75 @@
+# deploy/helm/aispm/templates/threat-hunting-agent-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: threat-hunting-agent
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  # 2 replicas + topology spread = no SPOF.  Each replica connects to
+  # Kafka via consumer-group, so partition assignment splits work.
+  replicas: {{ .Values.threatHuntingAgent.replicas | default 2 }}
+  selector:
+    matchLabels: { app: threat-hunting-agent }
+  template:
+    metadata:
+      labels: { app: threat-hunting-agent }
+    spec:
+      containers:
+        - name: threat-hunting-agent
+          image: {{ include "aispm.image" .Values.images.threatHunter }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8095
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: ORCHESTRATOR_URL
+              value: "http://agent-orchestrator.{{ .Values.global.namespace }}.svc.cluster.local:8094"
+            - name: PLATFORM_API_URL
+              value: "http://api.{{ .Values.global.namespace }}.svc.cluster.local:8080"
+            - name: SPM_DB_URL
+              value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+            # LLM model for threat hunting — matches LLM_MODEL in .env / DB int-017.
+            - name: HUNT_MODEL
+              value: "llama3.2"
+            - name: HUNT_BATCH_WINDOW_SEC
+              value: "30"
+            - name: HUNT_QUEUE_MAX
+              value: "20"
+            - name: LOG_LEVEL
+              value: "INFO"
+            # Bearer token used by the agent's OpenAI-compatible client to
+            # authenticate with spm-llm-proxy. The proxy validates the
+            # bearer token against the agents.llm_api_key column.
+            # Single source of truth: platform-secrets's
+            # THREAT_HUNTING_AGENT_LLM_KEY field. seed_db.py (called by
+            # the db-seed Job) reads the same env var and writes the
+            # token into agents.llm_api_key — DB and deployment are
+            # always in sync because both read the same Secret value.
+            # Rotation: update helm value + re-run db-seed.
+            - name: AGENT_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: THREAT_HUNTING_AGENT_LLM_KEY
+            # Service-account credentials used by SessionPoller + FindingsService
+            # to obtain Keycloak tokens for inter-service calls.
+            - name: SERVICE_ACCOUNT_USER
+              value: "admin@aispm.local"
+            - name: SERVICE_ACCOUNT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-admin-password
+          readinessProbe:
+            httpGet: { path: /health, port: 8095 }
+            initialDelaySeconds: 20
+            periodSeconds: 15

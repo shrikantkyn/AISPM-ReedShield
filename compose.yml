@@ -1,0 +1,935 @@
+
+x-common-env: &common-env
+  # All 3 brokers listed for client resilience — Kafka auto-discovers the rest
+  # after connecting to any one, but listing all three means no single bootstrap SPOF.
+  KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+  # Read by startup_orchestrator when creating topics (app.py: KAFKA_REPLICATION_FACTOR)
+  KAFKA_REPLICATION_FACTOR: "3"
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  OPA_URL: http://opa:8181
+  JWT_ALGORITHM: RS256
+  JWT_ISSUER: ${JWT_ISSUER:-cpm-platform}
+  JWT_PRIVATE_KEY_PATH: /keys/private.pem
+  JWT_PUBLIC_KEY_PATH: /keys/public.pem
+  # Secrets-at-rest and service-to-service auth (audit H1/H2/H3). Real values
+  # come from .env and are shared by every service so encrypted credentials and
+  # agent tokens decrypt consistently. INTEGRATION_KEY must be a Fernet key;
+  # when unset the code falls back to an insecure dev key and logs a warning.
+  INTEGRATION_KEY: ${INTEGRATION_KEY:-}
+  INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev-internal-secret-local-only}
+  TENANTS: ${TENANTS:-t1}
+  KAFKA_ENABLE_ACLS: ${KAFKA_ENABLE_ACLS:-false}
+  KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-3}
+  GUARD_MODEL_URL: http://guard-model:8200
+  GUARD_MODEL_ENABLED: ${GUARD_MODEL_ENABLED:-true}
+  # Client-side timeout for every service that calls /screen on guard-model.
+  # Must be high enough to cover local-LLM inference on CPU (llama-3.1-8b at
+  # Q4 on an M-series CPU takes 3–60s depending on prompt/load).  For real
+  # Groq cloud, 5.0 is plenty — override via env if you're on Groq cloud.
+  GUARD_MODEL_TIMEOUT: ${GUARD_MODEL_TIMEOUT:-60.0}
+  WS_WAIT_TIMEOUT_S: ${WS_WAIT_TIMEOUT_S:-10.0}
+  RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
+  CEP_SHORT_WINDOW_SEC: ${CEP_SHORT_WINDOW_SEC:-120}
+  CEP_LONG_WINDOW_SEC: ${CEP_LONG_WINDOW_SEC:-3600}
+  CEP_SHORT_THRESHOLD: ${CEP_SHORT_THRESHOLD:-5}
+  CEP_LONG_THRESHOLD: ${CEP_LONG_THRESHOLD:-15}
+  CEP_INTENT_DRIFT_THRESHOLD: ${CEP_INTENT_DRIFT_THRESHOLD:-0.65}
+  CEP_SESSION_HISTORY_SIZE: ${CEP_SESSION_HISTORY_SIZE:-10}
+  MEMORY_SESSION_TTL_SEC: ${MEMORY_SESSION_TTL_SEC:-3600}
+  MEMORY_LONGTERM_TTL_SEC: ${MEMORY_LONGTERM_TTL_SEC:-2592000}
+  MEMORY_SYSTEM_TTL_SEC: ${MEMORY_SYSTEM_TTL_SEC:-86400}
+  OUTPUT_GUARD_LLM_ENABLED: ${OUTPUT_GUARD_LLM_ENABLED:-true}
+  OUTPUT_GUARD_LLM_URL: http://guard-model:8200
+  POSTURE_ALLOW_THRESHOLD: ${POSTURE_ALLOW_THRESHOLD:-0.30}
+  POSTURE_ESCALATE_THRESHOLD: ${POSTURE_ESCALATE_THRESHOLD:-0.70}
+  POSTURE_BLOCK_THRESHOLD: ${POSTURE_BLOCK_THRESHOLD:-0.70}
+  SERVICE_VERSION: "3.0.0"
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  KEYS_DIR: /keys
+
+x-key-vol: &key-vol
+  - ./keys:/keys:ro
+
+x-depends-platform: &depends-platform
+  startup-orchestrator:
+    condition: service_completed_successfully
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  # ── Kafka — 3-node KRaft HA ensemble ────────────────────────────────────────
+  # Each node runs both broker and controller roles (KRaft combined mode).
+  # Quorum voters are all three nodes, so the cluster tolerates one node
+  # failure without losing leadership.
+  #
+  # Replication / durability settings:
+  #   RF=3, min.insync.replicas=2 — a write is only acked once 2/3 replicas
+  #   have confirmed it, so a single broker failure never causes data loss.
+  #
+  # Bootstrap: KAFKA_BOOTSTRAP_SERVERS lists all three to avoid a single
+  # bootstrap SPOF. Kafka clients auto-discover the full broker list once
+  # connected to any one broker.
+  #
+  # Backward compat: kafka-1 has hostname alias `kafka-broker` so any
+  # container that still uses the old single-broker hostname keeps working.
+  # All new code should use the three-entry bootstrap string.
+
+  kafka-1:
+    image: confluentinc/cp-kafka:7.6.1
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-kafka-1
+    hostname: kafka-1
+    ports: ["19092:19092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 25
+      start_period: 10s
+    # Dual-homed: default network (all platform services) + agent-net
+    # (customer agent containers that consume per-agent topics).
+    networks:
+      default:
+        aliases:
+          # Legacy alias — removes need to update every service that still
+          # resolves the old single-broker hostname.
+          - kafka-broker
+      agent-net: {}
+
+  kafka-2:
+    image: confluentinc/cp-kafka:7.6.1
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-kafka-2
+    hostname: kafka-2
+    depends_on:
+      kafka-1:
+        condition: service_started
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
+
+  kafka-3:
+    image: confluentinc/cp-kafka:7.6.1
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-kafka-3
+    hostname: kafka-3
+    depends_on:
+      kafka-1:
+        condition: service_started
+    environment:
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
+
+  redis:
+    image: redis:7-alpine
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-redis
+    ports: ["6379:6379"]
+    # --save "" disables RDB snapshots entirely. Our use of Redis is purely
+    # ephemeral (rate-limit counters + short-TTL credential cache), so there
+    # is nothing worth persisting through a restart. AOF is left on as
+    # belt-and-braces against in-flight burst loss; if that ever causes the
+    # same disk-can't-persist -> stop-writes failure mode, drop --appendonly
+    # too and run pure in-memory.
+    # stop-writes-on-bgsave-error no = even if persistence does fail, keep
+    # serving writes; a 500 on the chat path because the disk hiccupped is
+    # strictly worse than dropping a rate-limit counter.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "yes"
+      - --stop-writes-on-bgsave-error
+      - "no"
+      - --loglevel
+      - warning
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - ./DataVolumes/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  opa:
+    image: openpolicyagent/opa:0.70.0
+    platform: linux/amd64
+    container_name: cpm-opa
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=info", "/policies"]
+    volumes:
+      - ./opa/policies:/policies:ro
+    ports: ["8181:8181"]
+
+  # ── Startup orchestrator — runs once, provisions everything ────────────────
+
+  startup-orchestrator:
+    build: {context: ., dockerfile: services/startup_orchestrator/Dockerfile}
+    container_name: cpm-startup-orchestrator
+    environment:
+      <<: *common-env
+      KEYS_DIR: /keys-rw
+      JWT_PRIVATE_KEY_PATH: /keys-rw/private.pem
+      JWT_PUBLIC_KEY_PATH: /keys-rw/public.pem
+    volumes:
+      - ./keys:/keys-rw  # read-write so orchestrator can generate keys
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_started
+    restart: "no"
+
+  # ── Application services ───────────────────────────────────────────────────
+
+  guard-model:
+    build: {context: ., dockerfile: services/guard_model/Dockerfile}
+    container_name: cpm-guard-model
+    environment:
+      <<: *common-env
+      # Direct spm-db connection — platform_shared.integration_config.hydrate_env_from_db
+      # uses this at startup to pull GROQ_BASE_URL / LLM_MODEL / GUARD_PROMPT_MODE etc.
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # GROQ_BASE_URL: intentionally not set here.
+      # Hydrated from Ollama integration config (int-017.config.base_url → spm-db)
+      # by hydrate_env_from_db() at startup.  Set in .env only as a local override.
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-}
+      # Model (llama-guard3) and prompt mode (llama_guard) are hardcoded in app.py —
+      # guard always uses local Ollama llama-guard3, never a general chat model.
+      # GUARD_GROQ_MODEL and GUARD_PROMPT_MODE are no longer read from env.
+      # Server-side HTTP timeout to the LLM — must cover slowest cold-start
+      # inference. Only used when GROQ_BASE_URL is set.
+      GUARD_LLM_TIMEOUT_S: ${GUARD_LLM_TIMEOUT_S:-180}
+      # Set GUARD_DEBUG=1 in .env to log every raw model response (diagnosing
+      # JSON-schema drift, refusal loops, etc.).
+      GUARD_DEBUG: ${GUARD_DEBUG:-}
+    # host.docker.internal resolves to the host gateway on most desktop
+    # docker setups automatically.  The mapping below is explicit so Linux hosts
+    # also reach the host-side Ollama on :11434.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *key-vol
+    ports: ["8200:8200"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      <<: *depends-platform
+
+  # ── garak red-team sidecar ──────────────────────────────────────────────────
+  # garak carries heavy ML deps (torch, transformers, etc.) so it lives in its
+  # own container.  The API service talks to it via HTTP on port 8099.
+  # First build takes ~5 min (Rust compile + pip install torch).  Subsequent
+  # builds hit the layer cache as long as services/garak/requirements.txt is
+  # unchanged.
+  garak-runner:
+    build: {context: ., dockerfile: services/garak/Dockerfile}
+    container_name: cpm-garak-runner
+    environment:
+      # Direct spm-db connection — platform_shared.integration_config.hydrate_env_from_db
+      # pulls GARAK_INTERNAL_SECRET and SPM_INTERNAL_BOOTSTRAP_SECRET from int-018 at boot.
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROBE_TIMEOUT_S: ${PROBE_TIMEOUT_S:-60}
+      GARAK_WORKERS: ${GARAK_WORKERS:-4}
+      # Per-probe parallelism (task #25, ADR #1).  Garak dispatches attempts
+      # via imap_unordered against the CPM pipeline; these cap the in-flight
+      # POST /internal/probe fan-out.  Default bumped 4 → 8 (task #27) because
+      # encoding.InjectBase64 was still first-yielding at 48.28s against a
+      # 60s PROBE_TIMEOUT_S budget — only 12s of headroom.  More concurrent
+      # requests should drop first-yield time since InjectBase64 has many
+      # payload variants and the pool was starved by serialised CPM calls.
+      # Set GARAK_PARALLEL_USE_THREADS=0 to fall back to Garak's native
+      # multiprocessing Pool (will drop guard metadata across process
+      # boundaries — debug-only switch).
+      GARAK_PARALLEL_ATTEMPTS: ${GARAK_PARALLEL_ATTEMPTS:-8}
+      GARAK_MAX_WORKERS: ${GARAK_MAX_WORKERS:-8}
+      GARAK_PARALLEL_USE_THREADS: ${GARAK_PARALLEL_USE_THREADS:-1}
+      # Prompt-count cap (task #27): Garak's _execute_all eagerly processes
+      # every entry in probe.prompts; InjectBase64 ships 256 base64 variants
+      # which alone can blow the 60s budget.  Cap = max_attempts × oversample.
+      # Raise to see more payload variety; lower to speed up slow probes.
+      GARAK_PROMPT_OVERSAMPLE: ${GARAK_PROMPT_OVERSAMPLE:-4}
+      # Shared secret authenticating garak-runner → api callbacks. Must match
+      # the value the api container sees. Rotate via: openssl rand -hex 32.
+      GARAK_INTERNAL_SECRET: ${GARAK_INTERNAL_SECRET:-}
+      # CPM API base URL — used by CPMPipelineGenerator to route every probe
+      # prompt through the full security pipeline (lexical → guard → OPA → LLM
+      # → output scan) via POST /internal/probe.  When this is unset the
+      # runner silently falls back to garak's Blank() generator (empty
+      # responses), which causes every probe to "pass" because detectors see
+      # no harmful content in the empty output.  MUST be CPM_API_URL — the
+      # code in services/garak/main.py:_make_generator() reads this exact name.
+      CPM_API_URL: http://api:8080
+    ports: ["8099:8099"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8099/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      # garak imports torch/transformers on startup — give it time
+      start_period: 90s
+    restart: unless-stopped
+
+  # ── Model Security — artifact scanner (Model Security Architecture) ──
+  # Wraps Protect AI's ModelScan (Apache 2.0) to detect unsafe deserialization
+  # in uploaded model files. Same sidecar shape as garak-runner: thin FastAPI
+  # wrapper, findings normalised into the existing threat_findings table.
+  model-security:
+    build: {context: ., dockerfile: services/model_security/Dockerfile}
+    container_name: cpm-model-security
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KC_CLIENT_ID: aispm-ui
+      SERVICE_ACCOUNT_USER: admin@aispm.local
+      SERVICE_ACCOUNT_PASSWORD: admin-changeme
+      ORCHESTRATOR_URL: http://agent-orchestrator:8094
+    ports: ["8300:8300"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8300/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+
+  api:
+    build: {context: ., dockerfile: services/api/Dockerfile}
+    container_name: cpm-api
+    environment:
+      <<: *common-env
+      # DB is the source of truth for ANTHROPIC_API_KEY, TAVILY_API_KEY,
+      # GARAK_INTERNAL_SECRET, LLM_MODEL, ANTHROPIC_MODEL, etc.
+      # platform_shared.integration_config.hydrate_env_from_db() reads them
+      # from spm-db at process startup via SPM_DB_URL below.
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      LLM_MODEL_ID: ${LLM_MODEL_ID:-}
+      # OpenRouter — not part of the DB-hydration set above (plain env var).
+      # Takes priority over ANTHROPIC_API_KEY when set; see llm_client.py.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-5}
+      GARAK_RUNNER_URL: http://garak-runner:8099
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/aispm/protocol/openid-connect/certs
+      JWT_ISSUER: http://localhost:8180/realms/aispm
+      JWT_AUDIENCE: aispm-ui
+      # Service-account creds for garak_runner → findings_client to persist
+      # red-team findings into agent-orchestrator's threat_findings table.
+      # Same pattern/defaults as the threat-hunting-agent service below.
+      KC_CLIENT_ID: aispm-ui
+      SERVICE_ACCOUNT_USER: admin@aispm.local
+      SERVICE_ACCOUNT_PASSWORD: admin-changeme
+      ORCHESTRATOR_URL: http://agent-orchestrator:8094
+    volumes: *key-vol
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      <<: *depends-platform
+      guard-model:
+        condition: service_healthy
+      garak-runner:
+        condition: service_healthy
+
+  retrieval-gateway:
+    build: {context: ., dockerfile: services/retrieval_gateway/Dockerfile}
+    container_name: cpm-retrieval
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  processor:
+    build: {context: ., dockerfile: services/processor/Dockerfile}
+    container_name: cpm-processor
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  policy-decider:
+    build: {context: ., dockerfile: services/policy_decider/Dockerfile}
+    container_name: cpm-policy-decider
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  agent:
+    build: {context: ., dockerfile: services/agent/Dockerfile}
+    container_name: cpm-agent
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  memory-service:
+    build: {context: ., dockerfile: services/memory_service/Dockerfile}
+    container_name: cpm-memory
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  executor:
+    build: {context: ., dockerfile: services/executor/Dockerfile}
+    container_name: cpm-executor
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  tool-parser:
+    build: {context: ., dockerfile: services/tool_parser/Dockerfile}
+    container_name: cpm-tool-parser
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  output-guard:
+    build: {context: ., dockerfile: services/output_guard/Dockerfile}
+    container_name: cpm-output-guard
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+      guard-model:
+        condition: service_healthy
+
+  freeze-controller:
+    build: {context: ., dockerfile: services/freeze_controller/Dockerfile}
+    container_name: cpm-freeze
+    environment: *common-env
+    volumes: *key-vol
+    ports: ["8090:8090"]
+    depends_on:
+      <<: *depends-platform
+
+  policy-simulator:
+    build: {context: ., dockerfile: services/policy_simulator/Dockerfile}
+    container_name: cpm-policy-sim
+    environment: *common-env
+    volumes: *key-vol
+    ports: ["8091:8091"]
+    depends_on:
+      <<: *depends-platform
+
+  # ── Apache Flink cluster (sole CEP producer) ──────────────────────────────
+  # A real JobManager + TaskManager pair running the PyFlink CEP job from
+  # services/flink_pyjob. Writes directly to cpm.<tenant>.audit.
+  #
+  # Storage: checkpoints write to a local bind-mounted directory
+  # (./DataVolumes/flink-checkpoints). Same pattern as spm-db, kafka, etc.
+  # No new database, no MinIO. Fine for single-host docker-compose;
+  # multi-host K8s deployment would swap in S3 here.
+
+  flink-jobmanager:
+    build:
+      context: .
+      dockerfile: services/flink_pyjob/Dockerfile
+    image: aispm-flink-pyjob:latest
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-flink-jobmanager
+    hostname: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    # All cluster config (state backend, checkpointing, restart strategy,
+    # RPC address) lives in the bind-mounted flink-conf.yaml — no
+    # FLINK_PROPERTIES env var needed. Single source of truth, easier to
+    # diff in PRs, no risk of compose-vs-yaml drift.
+    volumes:
+      - ./flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+      - ./DataVolumes/flink-checkpoints:/flink/checkpoints
+      - ./DataVolumes/flink-savepoints:/flink/savepoints
+
+  flink-taskmanager:
+    image: aispm-flink-pyjob:latest
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-flink-taskmanager
+    command: taskmanager
+    # Slot count, state backend, JM address — all in flink-conf.yaml.
+    # CEP threshold env vars are read by state.py and detection.py at module
+    # load time inside the TaskManager process (pemja in-process execution).
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      # CEP window sizes — how far back each sliding window looks
+      CEP_SHORT_WINDOW_SEC:       ${CEP_SHORT_WINDOW_SEC:-120}
+      CEP_LONG_WINDOW_SEC:        ${CEP_LONG_WINDOW_SEC:-3600}
+      # CEP alert thresholds — how many events trigger each alert level
+      CEP_SHORT_THRESHOLD:        ${CEP_SHORT_THRESHOLD:-5}
+      CEP_LONG_THRESHOLD:         ${CEP_LONG_THRESHOLD:-15}
+      # Drift + session config
+      CEP_INTENT_DRIFT_THRESHOLD: ${CEP_INTENT_DRIFT_THRESHOLD:-0.65}
+      CEP_SESSION_HISTORY_SIZE:   ${CEP_SESSION_HISTORY_SIZE:-10}
+    volumes:
+      - ./flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+      # Bind-mount user code over the COPY-ed version so dev iteration
+      # doesn't require rebuilding the image.
+      - ./services/flink_pyjob:/opt/flink-pyjob/services/flink_pyjob:ro
+      - ./platform_shared:/opt/flink-pyjob/platform_shared:ro
+      # Checkpoint dirs must be SHARED with the JobManager (single host
+      # deployment) — same bind mount on both.
+      - ./DataVolumes/flink-checkpoints:/flink/checkpoints
+      - ./DataVolumes/flink-savepoints:/flink/savepoints
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+
+  flink-pyjob-submitter:
+    image: aispm-flink-pyjob:latest
+    container_name: cpm-flink-pyjob-submitter
+    entrypoint: ["/opt/flink-pyjob/submit.sh"]
+    # Bind-mount user code over the COPY-ed version so dev iteration on
+    # the job (cep_job.py, state.py, sinks.py) doesn't require rebuilding
+    # the image. Same pattern as flink-taskmanager above; keep the two in
+    # sync so the submitter and the workers always see the same source tree.
+    volumes:
+      - ./services/flink_pyjob:/opt/flink-pyjob/services/flink_pyjob:ro
+      - ./platform_shared:/opt/flink-pyjob/platform_shared:ro
+    environment:
+      FLINK_JM_URL: http://flink-jobmanager:8081
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      CEP_TENANT_IDS: ${CEP_TENANT_IDS:-t1}
+      # Sink topic suffix — parameterized so a future shadow run (for
+      # example, before rolling out a CEP rule rewrite) can point this at
+      # a different topic without touching compose. Default is the live
+      # audit sink.
+      CEP_AUDIT_TOPIC_SUFFIX: ${CEP_AUDIT_TOPIC_SUFFIX:-audit}
+      CEP_PARALLELISM: ${CEP_PARALLELISM:-2}
+      # CEP thresholds — forwarded to the running job via the submit script.
+      # Must match what flink-taskmanager sees so shadow-run comparisons are
+      # apples-to-apples.
+      CEP_SHORT_WINDOW_SEC:       ${CEP_SHORT_WINDOW_SEC:-120}
+      CEP_LONG_WINDOW_SEC:        ${CEP_LONG_WINDOW_SEC:-3600}
+      CEP_SHORT_THRESHOLD:        ${CEP_SHORT_THRESHOLD:-5}
+      CEP_LONG_THRESHOLD:         ${CEP_LONG_THRESHOLD:-15}
+      CEP_INTENT_DRIFT_THRESHOLD: ${CEP_INTENT_DRIFT_THRESHOLD:-0.65}
+      CEP_SESSION_HISTORY_SIZE:   ${CEP_SESSION_HISTORY_SIZE:-10}
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      kafka-1:
+        condition: service_healthy
+    # `restart: no` so we don't re-submit on success — the submitter exits
+    # cleanly once `flink run --detached` returns. The job itself runs in
+    # the cluster and survives container restarts.
+    restart: "no"
+
+  # ── Keycloak identity provider ───────────────────────────────────────────────
+  # Keycloak runs in the kind cluster (see deploy/helm/aispm/); this stub
+  # documents the expected env vars for local dev / auth/seed-users.sh.
+  # To run locally: docker run --rm -p 8180:8080 -e KEYCLOAK_ADMIN=admin \
+  #   -e KEYCLOAK_ADMIN_PASSWORD=admin-changeme-in-prod quay.io/keycloak/keycloak start-dev
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: cpm-keycloak
+    command: start-dev
+    ports: ["8180:8080"]
+    environment:
+      AISPM_CLIENT_SECRET: aispm-client-secret-changeme
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin-changeme-in-prod
+      SEED_ADMIN_PASSWORD: admin-changeme-in-prod
+      SEED_AUDITOR_PASSWORD: auditor-changeme-in-prod
+      SEED_VIEWER_PASSWORD: viewer-changeme-in-prod
+    profiles: ["keycloak"]
+
+  # ── AI SPM Platform ──────────────────────────────────────────────────────────
+
+  # spm-db: PostgreSQL for local docker-compose development.
+  # (Production uses CNPG in the kind cluster.)
+  spm-db:
+    image: postgres:16-alpine
+    container_name: cpm-spm-db
+    environment:
+      POSTGRES_DB: spm
+      POSTGRES_USER: spm_rw
+      POSTGRES_PASSWORD: ${SPM_DB_PASSWORD:-spmpass}
+    ports: ["5432:5432"]
+    volumes:
+      - ./DataVolumes/spm-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spm_rw -d spm"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  spm-api:
+    build:
+      context: .
+      dockerfile: services/spm_api/Dockerfile
+    container_name: cpm-spm-api
+    ports: ["8092:8092"]
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql+asyncpg://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      FREEZE_CONTROLLER_URL: http://freeze-controller:8090
+      SPM_SERVICE_JWT: ""
+      PROMETHEUS_URL: http://prometheus:9090
+      CPM_API_URL: http://api:8080
+      POLICY_SIMULATOR_URL: http://policy-simulator:8091
+      # Uploaded model files land here (inside the container).
+      # Mounted to ./services/spm_api/models on the host below.
+      MODEL_UPLOAD_DIR: /app/models
+      # First-boot bootstrap: POST /integrations/bootstrap reads these from
+      # process env and copies them into the DB.  After the first successful
+      # bootstrap these can be dropped from .env — subsequent bootstraps
+      # won't overwrite DB values with empty env (see _envget in
+      # integrations_seed_data.py).  Canonical mapping:
+      #   ANTHROPIC_API_KEY             → int-003.credentials.api_key
+      #   ANTHROPIC_MODEL               → int-003.config.model
+      #   TAVILY_API_KEY                → int-016.credentials.api_key
+      #   GROQ_BASE_URL                 → int-017.config.base_url
+      #   LLM_MODEL                     → int-017.config.model
+      #   GUARD_PROMPT_MODE             → int-017.config.guard_prompt_mode
+      #   OLLAMA_KEEP_ALIVE             → int-017.config.keep_alive
+      #   GARAK_INTERNAL_SECRET         → int-018.credentials.shared_secret
+      #   SPM_INTERNAL_BOOTSTRAP_SECRET → int-018.credentials.internal_bootstrap_secret
+      # Phase 1 — agent runtime control plane. spawn_agent_container
+      # passes a bind-mount path to the docker daemon, which resolves
+      # paths against the HOST. spm-api writes agent.py files to its
+      # own container view (/app/DataVolumes/agents/<id>/agent.py)
+      # but must store the equivalent HOST path so the daemon can
+      # find the file when launching the runtime container.
+      AGENT_CODE_HOST_DIR: ${PWD}/DataVolumes/agents
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      GUARD_PROMPT_MODE: ${GUARD_PROMPT_MODE:-}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-}
+      GARAK_INTERNAL_SECRET: ${GARAK_INTERNAL_SECRET:-}
+      SPM_INTERNAL_BOOTSTRAP_SECRET: ${SPM_INTERNAL_BOOTSTRAP_SECRET:-}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/aispm/protocol/openid-connect/certs
+      JWT_ISSUER: http://localhost:8180/realms/aispm
+      JWT_AUDIENCE: aispm-ui
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev-internal-secret-local-only}
+    volumes:
+      - ./keys:/keys:ro
+      # Persist uploaded model artefacts on the host (listed in .gitignore).
+      - ./services/spm_api/models:/app/models
+      # Phase 1 — agent runtime control plane. spm-api uses the docker
+      # SDK to spawn/stop customer agent containers, so it needs to
+      # talk to the host's Docker daemon. Mount the socket read-write.
+      # SECURITY: this gives spm-api root-equivalent access to the
+      # host's Docker. Acceptable in the dev compose stack; production
+      # should sandbox spm-api or use a per-tenant docker-in-docker
+      # daemon (V2 hardening — spec § 2 non-goal).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Customer agent.py files are written here by POST /agents and
+      # bind-mounted into the spawned agent runtime container, so
+      # both spm-api AND the runtime container need to see the same
+      # path. Bind-mount the host directory.
+      - ./DataVolumes/agents:/app/DataVolumes/agents
+    # Integrations' Test-connection probe hits host-side Ollama at
+    # host.docker.internal:11434.  Most desktop docker setups auto-resolve
+    # this; Linux needs the explicit host-gateway mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Phase 1 — agent runtime control plane. Customer agent containers
+    # run on the internal-only `agent-net` and need to call back to
+    # spm-api for the ready() handshake, /secrets/*, and history. Dual-
+    # homing spm-api on both networks lets the SDK reach it without
+    # exposing it to the public internet from agent-net.
+    networks: [default, agent-net]
+
+  spm-aggregator:
+    build:
+      context: .
+      dockerfile: services/spm_aggregator/Dockerfile
+    container_name: cpm-spm-aggregator
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      SPM_API_URL: http://spm-api:8092
+      SPM_MODEL_BLOCK_THRESHOLD: ${SPM_MODEL_BLOCK_THRESHOLD:-0.85}
+      SPM_SNAPSHOT_INTERVAL_SEC: ${SPM_SNAPSHOT_INTERVAL_SEC:-300}
+      SPM_ENFORCEMENT_WINDOW: ${SPM_ENFORCEMENT_WINDOW:-3}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev-internal-secret-local-only}
+    depends_on:
+      spm-api:
+        condition: service_healthy
+      <<: *depends-platform
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    container_name: cpm-grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_JWT_ENABLED: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./DataVolumes/grafana:/var/lib/grafana
+    depends_on:
+      spm-api:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+
+  agent-orchestrator:
+    build:
+      context: .
+      dockerfile: services/agent-orchestrator-service/Dockerfile
+    container_name: cpm-agent-orchestrator
+    environment:
+      DB_PATH: /data/agent_orchestrator.db
+      LOG_LEVEL: INFO
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      POLICY_DB_URL: postgresql+psycopg2://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/aispm/protocol/openid-connect/certs
+      JWT_ISSUER: http://localhost:8180/realms/aispm
+      JWT_AUDIENCE: aispm-ui
+    volumes:
+      - ./DataVolumes/agent-orchestrator:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8094/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      <<: *depends-platform
+
+  threat-hunting-agent:
+    build:
+      context: .
+      dockerfile: services/threat-hunting-agent/Dockerfile
+    container_name: cpm-threat-hunting-agent
+    environment:
+      <<: *common-env
+      GROQ_API_KEY: ${GROQ_API_KEY:-local}
+      # Single source of truth for guard + hunt model names is LLM_MODEL in .env.
+      HUNT_MODEL: ${LLM_MODEL:-llama3.2}
+      TENANTS: ${TENANTS:-t1}
+      ORCHESTRATOR_URL: http://agent-orchestrator:8094
+      PLATFORM_API_URL: http://api:8080
+      GUARD_MODEL_URL: http://guard-model:8200
+      OPA_URL: http://opa:8181
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      HUNT_BATCH_WINDOW_SEC: ${HUNT_BATCH_WINDOW_SEC:-30}
+      HUNT_QUEUE_MAX: ${HUNT_QUEUE_MAX:-20}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # LLM backend. Blank = Groq cloud (requires GROQ_API_KEY). Set in .env to
+      # http://host.docker.internal:11434/v1 for host Ollama.
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KC_CLIENT_ID: aispm-ui
+      SERVICE_ACCOUNT_USER: admin@aispm.local
+      SERVICE_ACCOUNT_PASSWORD: admin-changeme
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8095/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_started
+      agent-orchestrator:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── LLM backend: host Ollama (not a compose service) ────────────────────
+  # Guard + hunt both talk to Ollama running on the host via
+  # host.docker.internal:11434/v1 (OpenAI-compatible surface).
+  # On most desktop docker setups this resolves automatically; on Linux the
+  # extra_hosts: "host.docker.internal:host-gateway" mappings on guard-model
+  # and threat-hunting-agent make it resolve too.
+  #
+  # Host setup (once):
+  #   brew install ollama
+  #   ollama serve &
+  #   ollama pull llama3.2
+  #   export OLLAMA_KEEP_ALIVE=24h   # prevent 5-min idle unload
+
+  ui:
+    build: {context: ./ui, dockerfile: Dockerfile}
+    container_name: cpm-ui
+    # platform: linux/arm64/v8  # removed for amd64 compat
+    ports: ["3001:3001"]
+    environment:
+      VITE_KEYCLOAK_URL: http://localhost:8180
+      VITE_KC_REALM: aispm
+      VITE_KC_CLIENT_ID: aispm-ui
+    depends_on:
+      - api
+      - agent-orchestrator
+
+  # ── Agent runtime control plane (Phase 1) ───────────────────────────────
+  # Two new services + one image-only build for the customer agent runtime.
+  # Customer agent containers are NOT a service entry — spm-api spawns them
+  # on demand via the docker SDK and bind-mounts the uploaded agent.py.
+
+  spm-mcp:
+    build:
+      context: .
+      dockerfile: services/spm_mcp/Dockerfile
+    image: aispm-spm-mcp:latest
+    container_name: cpm-spm-mcp
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql+asyncpg://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+    ports: ["8500:8500"]
+    networks: [default, agent-net]
+    depends_on:
+      kafka-1: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  spm-llm-proxy:
+    build:
+      context: .
+      dockerfile: services/spm_llm_proxy/Dockerfile
+    image: aispm-spm-llm-proxy:latest
+    container_name: cpm-spm-llm-proxy
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql+asyncpg://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+    ports: ["8501:8500"]
+    networks: [default, agent-net]
+    extra_hosts:
+      # The default LLM upstream in dev is host Ollama.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Image-only build for the per-agent runtime container. The image is
+  # produced by `docker compose --profile build-only build agent-runtime-build`
+  # and consumed by spm-api at deploy time. Listed as a service (rather than
+  # a bare build) so `docker compose build` picks it up and Compose's normal
+  # build cache applies.
+  agent-runtime-build:
+    build:
+      context: .
+      dockerfile: agent_runtime/Dockerfile
+    image: aispm-agent-runtime:latest
+    profiles: ["build-only"]
+    command: ["true"]
+
+networks:
+  agent-net:
+    # Pin the network name so Docker doesn't auto-prefix it with the
+    # compose project name. spm-api spawns customer agent containers
+    # via the docker SDK with `network="agent-net"` (literal); without
+    # this `name:` override the actual network would be e.g.
+    # `aispm_agent-net` and the spawn would fail with
+    # "network agent-net not found".
+    name: agent-net
+    driver: bridge
+    # Agents have no direct internet egress: they can only reach
+    # spm-mcp and spm-llm-proxy (which bridge default + agent-net),
+    # and Kafka (also reachable through default — agents connect to
+    # the broker via the mesh-internal hostname `kafka-broker:9092`).
+    internal: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent state lives in ./DataVolumes/{redis,spm-db,grafana,agent-orchestrator}
+# (bind mounts on each service above) so the data is visible on the host
+# filesystem and survives `docker compose down -v`.
+#
+# Migration from the previous named volumes (AISPM_redis-data, etc.) is in
+# DataVolumes/migrate-volumes.sh — run it once before `docker compose up`.
+# ─────────────────────────────────────────────────────────────────────────────

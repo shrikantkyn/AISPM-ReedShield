@@ -1,0 +1,119 @@
+# deploy/helm/aispm/templates/flink-pvc.yaml
+#
+# PVC access-mode notes for 2-JobManager HA:
+#
+#   flink-checkpoints (ReadWriteMany):
+#     Both JM replicas mount this PVC. The active JM writes checkpoint
+#     metadata; the standby must be able to read it during recovery.
+#     Requires a RWX-capable StorageClass (Longhorn, NFS, CephFS) on
+#     multi-node clusters.  On the kind dev cluster this PVC is not
+#     rendered at all because flink.haStorageDir is set to s3:// (MinIO);
+#     state is backed by erasure-coded MinIO instead of a shared PVC.
+#     See values.dev-multinode.yaml + flink-conf-configmap.yaml.
+#
+#   flink-ha (ReadWriteMany):
+#     Holds JobGraph blobs and HA metadata published by the leader.
+#     The standby JM reads these blobs to reconstruct job state on
+#     failover. Same RWX requirement as flink-checkpoints.
+#
+#   flink-savepoints + flink-taskmanager-state (ReadWriteOnce):
+#     Single-writer semantics: only the active JM triggers savepoints,
+#     and each TM replica has its own volume via volumeClaimTemplates.
+#     RWO is correct and sufficient here.
+
+{{- /*
+Checkpoint + HA PVCs are skipped entirely when state.checkpoints.dir and
+high-availability.storageDir are configured to an s3:// (or other non-file)
+URI — Flink writes its HA blobs and checkpoint metadata to object storage,
+so there's nothing for the JM/TM containers to mount. This is what the
+multinode profile uses (MinIO via flink-s3-fs-hadoop). Only render the
+file-system PVCs when the chart is actually using filesystem storage.
+*/ -}}
+{{- $useFileCheckpoints := not (hasPrefix "s3:" (.Values.flink.checkpointsDir | default "file:///flink/checkpoints")) -}}
+{{- $useFileHa          := not (hasPrefix "s3:" (.Values.flink.haStorageDir  | default "file:///flink/ha")) -}}
+
+{{- if $useFileCheckpoints }}
+# ── Checkpoint storage (shared by both JM replicas) ─────────────────────────
+# Access mode is values-driven:
+#   prod (.Values.flink.sharedAccessMode = ReadWriteMany) — both JM
+#     replicas mount this PVC; active writes, standby reads on recovery.
+#     Requires a RWX-capable StorageClass (longhorn / NFS / CephFS).
+#   dev/kind — checkpoints live in MinIO via s3:// (no PVC rendered).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-checkpoints
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - {{ .Values.flink.sharedAccessMode | default "ReadWriteMany" }}
+  storageClassName: {{ .Values.flink.storageClass | default "local-path" }}
+  resources:
+    requests:
+      storage: 5Gi
+---
+{{- end }}
+# ── Savepoint storage (active JM only) ──────────────────────────────────────
+# RWO is sufficient: only the active JM triggers savepoints.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-savepoints
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+# ── TaskManager RocksDB state (single TM writer) ─────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-taskmanager-state
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+{{- if $useFileHa }}
+---
+# ── JobManager HA blob store (shared by both JM replicas) ────────────────────
+# Same RWX/RWO rationale as flink-checkpoints above — values-driven so dev
+# binds on local-path and prod uses RWX storage for true 2-replica HA.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-ha
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - {{ .Values.flink.sharedAccessMode | default "ReadWriteMany" }}
+  storageClassName: {{ .Values.flink.storageClass | default "local-path" }}
+  resources:
+    requests:
+      storage: 2Gi
+{{- end }}

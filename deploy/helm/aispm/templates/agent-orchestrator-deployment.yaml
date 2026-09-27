@@ -1,0 +1,65 @@
+# deploy/helm/aispm/templates/agent-orchestrator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-orchestrator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  # 2 replicas + topology spread = no SPOF.  Both replicas consume from
+  # the chat.in topic in the same Kafka consumer-group, so partition
+  # assignment splits sessions across them automatically — no leader
+  # election needed.  Pod-spawn requests are idempotent (the
+  # agent_controller checks for an existing Pod before creating).
+  # If you observe double-spawn races in the future, switch this
+  # service to a leader-elected pattern (Kubernetes lease).
+  replicas: {{ .Values.agentOrchestrator.replicas | default 2 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: { app: agent-orchestrator }
+  template:
+    metadata:
+      labels: { app: agent-orchestrator }
+    spec:
+      # ServiceAccount with read+patch on the opa-policies ConfigMap, used
+      # by policies/opa_sync.activate_with_opa_sync when an operator
+      # promotes a policy version in the UI. Defined in
+      # templates/agent-orchestrator-rbac.yaml.
+      serviceAccountName: agent-orchestrator
+      containers:
+        - name: agent-orchestrator
+          image: {{ include "aispm.image" .Values.images.agentOrchestrator }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8094
+          envFrom:
+            - secretRef:
+                name: platform-secrets
+            - configMapRef:
+                name: platform-env
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: DB_PATH
+              value: /data/agent_orchestrator.db
+            - name: POLICY_DB_URL
+              value: "postgresql+psycopg2://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /health, port: 8094 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agent-orchestrator-data

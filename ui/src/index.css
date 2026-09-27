@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/*
+ * ReedShield — Light Premium Enterprise Security theme.
+ * Warm-white grounds, charcoal type, hairline borders, restrained shadows,
+ * one controlled violet brand accent, and a four-level security status palette.
+ */
+:root {
+  --bg:              #FAFAF9;   /* page ground: warm off-white */
+  --surface:         #FFFFFF;   /* cards */
+  --surface-subtle:  #F5F5F4;   /* toolbars, table headers, sidebar */
+  --border:          #E7E5E4;   /* hairline */
+  --border-strong:   #D6D3D1;
+  --text:            #1C1917;   /* charcoal */
+  --text-2:          #57534E;
+  --text-3:          #78716C;
+  --brand:           #7C3AED;   /* controlled violet accent */
+  --brand-strong:    #6D28D9;
+  --brand-wash:      #F5F3FF;
+  --success:         #16A34A;
+  --warning:         #D97706;
+  --high:            #EA580C;
+  --critical:        #DC2626;
+  --info:            #0891B2;
+
+  /* legacy aliases still referenced by the chat surface and components */
+  --paper:           var(--bg);
+  --paper-2:         var(--surface-subtle);
+  --sheet:           var(--surface);
+  --sheet-2:         var(--surface-subtle);
+  --rule:            var(--border);
+  --rule-strong:     var(--border-strong);
+  --ink:             var(--text);
+  --ink-2:           var(--text-2);
+  --ink-3:           var(--text-3);
+  --stamp:           var(--brand);
+  --stamp-2:         var(--brand-strong);
+  --stamp-wash:      var(--brand-wash);
+  --pencil-red:      var(--critical);
+  --pencil-amber:    var(--warning);
+  --pencil-green:    var(--success);
+  --bg-2:            var(--surface-subtle);
+  --bg-3:            #EFEEEC;
+  --accent:          var(--brand);
+  --accent-2:        var(--brand-strong);
+  --accent-glow:     var(--brand-wash);
+  --user-bg:         #F5F5F4;
+  --assistant-bg:    #F5F3FF;
+  --radius-sm:       4px;
+  --radius:          6px;
+  --radius-lg:       8px;
+  --shadow-sm:       0 1px 2px 0 rgba(28,25,23,0.05);
+  --shadow:          0 1px 3px 0 rgba(28,25,23,0.06), 0 1px 2px -1px rgba(28,25,23,0.05);
+  --transition:      0.18s cubic-bezier(0.16, 1, 0.3, 1);
+
+  font-family: 'Archivo', 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color-scheme: light;
+  accent-color: var(--brand);
+  caret-color: var(--brand);
+}
+
+html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
+body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+
+::selection { background: var(--brand-wash); color: var(--brand-strong); }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+button { cursor: pointer; border: none; background: none; font-family: inherit; color: inherit; }
+input, textarea, select { font-family: inherit; }
+input::placeholder, textarea::placeholder { color: var(--text-3); opacity: 1; }
+a { color: inherit; text-decoration: none; }
+a[href]:not([class]) { color: var(--brand-strong); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--border-strong); }
+
+/* Scrollbar — thin, warm, unobtrusive */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border: 3px solid var(--bg); border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+* { scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* Code blocks inside chat messages */
+pre {
+  background: #1C1917;
+  color: #E7E5E4;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 8px 0;
+  font-family: 'Fragment Mono', ui-monospace, Menlo, monospace;
+}
+code {
+  background: var(--surface-subtle);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'Fragment Mono', ui-monospace, Menlo, monospace;
+}
+pre code { background: none; padding: 0; }
+
+.message-content p { margin-bottom: 8px; line-height: 1.65; }
+.message-content p:last-child { margin-bottom: 0; }
+.message-content ul, .message-content ol { padding-left: 20px; margin-bottom: 8px; }
+.message-content li { margin-bottom: 4px; line-height: 1.55; }
+.message-content strong { font-weight: 600; }
+.message-content em { font-style: italic; }
+.message-content h1, .message-content h2, .message-content h3 { font-weight: 600; margin-bottom: 6px; margin-top: 12px; }
+
+/* ── Status badge (was: rubber stamp) ─────────────────────────────────────── */
+/* Flat, subtle pill. The .stamp class name is kept so callers need no change. */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 9999px;
+  font-weight: 600;
+  font-size: 11px;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  background: color-mix(in srgb, currentColor 8%, white);
+}
+.stamp--flat { background: transparent; }
+
+/* Tick-mark draw: the one authored motion, kept subtle. */
+@keyframes tick-draw { from { stroke-dashoffset: 40; } to { stroke-dashoffset: 0; } }
+.tick-draw path { stroke-dasharray: 40; animation: tick-draw 0.2s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@keyframes fadeIn          { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slideUp         { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes blink           { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes pulse           { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+@keyframes spin            { to { transform: rotate(360deg); } }
+@keyframes dropdown-open   { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.animate-dropdown { animation: dropdown-open 0.15s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Clock digit cross-fade (paper/ClockDigits). */
+@keyframes clock-fade { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-4px); } }
+.clock-fade { animation: clock-fade 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

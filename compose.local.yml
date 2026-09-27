@@ -1,0 +1,95 @@
+# Local dev override — NOT part of the upstream project.
+#
+# Upstream compose.yml documents that `docker compose up` is no longer a
+# supported workflow (spm-db/Postgres now only exists via CNPG inside the
+# Kind cluster; the real path is deploy/scripts/bootstrap-cluster.sh).
+# This override patches compose.yml just enough to run a minimal subset
+# locally on constrained hardware:
+#   - adds back a plain Postgres container as `spm-db`
+#   - drops the hardcoded linux/arm64/v8 platform pins (this host is amd64)
+#   - shrinks kafka-1 from a 3-node KRaft ensemble to a single standalone
+#     broker, and repoints every service's KAFKA_BOOTSTRAP_SERVERS at it
+#
+# Bring up only: spm-db kafka-1 redis opa startup-orchestrator guard-model
+# garak-runner api spm-api ui
+# (kafka-2/kafka-3/flink/keycloak/grafana/prometheus/etc are simply never
+# listed on the `up` command, so compose never creates them.)
+
+services:
+  spm-db:
+    image: postgres:16-alpine
+    container_name: cpm-spm-db
+    environment:
+      POSTGRES_USER: spm_rw
+      POSTGRES_PASSWORD: ${SPM_DB_PASSWORD:-spmpass}
+      POSTGRES_DB: spm
+    volumes:
+      - ./DataVolumes/spm-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spm_rw -d spm"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    platform: linux/amd64
+
+  kafka-1:
+    platform: linux/amd64
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
+
+  ui:
+    platform: linux/amd64
+
+  # Join the app's default network too so ui's nginx can reach it by name
+  # for the /realms/* and /resources/* proxy rules (compose.auth.yml only
+  # puts keycloak on the traefik network).
+  keycloak:
+    networks: [default, traefik]
+
+  startup-orchestrator:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092
+      KAFKA_REPLICATION_FACTOR: "1"
+
+  guard-model:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092
+
+  api:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092
+      # This local Keycloak instance was seeded with password "admin" (see
+      # auth/seed-users.sh), not the upstream default "admin-changeme".
+      SERVICE_ACCOUNT_PASSWORD: admin
+
+  model-security:
+    environment:
+      SERVICE_ACCOUNT_PASSWORD: admin
+
+  spm-api:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092
+
+networks:
+  # compose.auth.yml expects the project's default network to be named
+  # aispm_default; our compose project name is derived from the folder
+  # (scapia), so the real network is scapia_default. Point it there.
+  aispm-default:
+    name: scapia_default
+    external: true

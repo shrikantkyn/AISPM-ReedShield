@@ -1,0 +1,58 @@
+[
+  {
+    "framework": "EU_AI_ACT",
+    "function": "RISK_MANAGEMENT",
+    "category": "EUAI-9.1",
+    "subcategory": "Article 9 — continuous risk management system across the AI system's lifecycle",
+    "cpm_control": "processor:7_dimension_risk_fusion",
+    "evaluation_rule": "risk_fusion_active"
+  },
+  {
+    "framework": "EU_AI_ACT",
+    "function": "RISK_MANAGEMENT",
+    "category": "EUAI-9.2",
+    "subcategory": "Article 9 — every model classified into a risk tier consistent with the Act's tiering",
+    "cpm_control": "model_registry:risk_tier_assigned",
+    "evaluation_rule": "models_have_risk_tier"
+  },
+  {
+    "framework": "EU_AI_ACT",
+    "function": "DATA_GOVERNANCE",
+    "category": "EUAI-10.1",
+    "subcategory": "Article 10 — data governance: retrieval provenance and trust scoring for RAG sources",
+    "cpm_control": "retrieval_gateway:sha256_provenance",
+    "evaluation_rule": "risk_fusion_active"
+  },
+  {
+    "framework": "EU_AI_ACT",
+    "function": "LOGGING",
+    "category": "EUAI-12.1",
+    "subcategory": "Article 12 — automatic logging of events for traceability across the system's operation",
+    "cpm_control": "audit_export:full_event_log",
+    "evaluation_rule": "enforcement_action_exists"
+  },
+  {
+    "framework": "EU_AI_ACT",
+    "function": "HUMAN_OVERSIGHT",
+    "category": "EUAI-14.1",
+    "subcategory": "Article 14 — human oversight: an authenticated admin can halt or freeze the system",
+    "cpm_control": "freeze_controller:rs256_admin_freeze",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "EU_AI_ACT",
+    "function": "ACCURACY_ROBUSTNESS",
+    "category": "EUAI-15.1",
+    "subcategory": "Article 15 — accuracy/robustness/cybersecurity: model artifacts verified before deployment",
+    "cpm_control": "model-security:modelscan_scanner",
+    "evaluation_rule": "model_security_scanner_reachable"
+  },
+  {
+    "framework": "EU_AI_ACT",
+    "function": "ACCURACY_ROBUSTNESS",
+    "category": "EUAI-15.2",
+    "subcategory": "Article 15 — resilience against adversarial manipulation, validated by red-team testing",
+    "cpm_control": "garak_runner:adversarial_probe_suite",
+    "evaluation_rule": "snapshots_recent"
+  }
+]

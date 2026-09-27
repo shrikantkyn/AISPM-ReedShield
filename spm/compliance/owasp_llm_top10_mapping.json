@@ -1,0 +1,66 @@
+[
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM01",
+    "category": "OWASP-LLM01",
+    "subcategory": "Prompt Injection — direct and indirect injection blocked before reaching the model",
+    "cpm_control": "OPA:tool_injection_guard.rego,jailbreak_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM02",
+    "category": "OWASP-LLM02",
+    "subcategory": "Insecure Output Handling — output scanned for schema/tool-leak before returning to caller",
+    "cpm_control": "OPA:output_schema_guard.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM04",
+    "category": "OWASP-LLM04",
+    "subcategory": "Model Denial of Service — per-identity rate limiting in place",
+    "cpm_control": "platform_shared:rate_limit_rpm",
+    "evaluation_rule": "enforcement_action_exists"
+  },
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM05",
+    "category": "OWASP-LLM05",
+    "subcategory": "Supply Chain Vulnerabilities — model artifacts scanned for unsafe deserialization before use",
+    "cpm_control": "model-security:modelscan_scanner",
+    "evaluation_rule": "model_security_scanner_reachable"
+  },
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM06",
+    "category": "OWASP-LLM06",
+    "subcategory": "Sensitive Information Disclosure — PII detected and redacted on egress",
+    "cpm_control": "OPA:pii_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM07",
+    "category": "OWASP-LLM07",
+    "subcategory": "Insecure Plugin Design — tool invocation gated by per-tool scope and posture ceiling",
+    "cpm_control": "OPA:tool_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM08",
+    "category": "OWASP-LLM08",
+    "subcategory": "Excessive Agency — agent tool resolution constrained to a fixed, policy-gated tool set",
+    "cpm_control": "OPA:agent_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "OWASP_LLM_TOP10",
+    "function": "LLM10",
+    "category": "OWASP-LLM10",
+    "subcategory": "Model Theft — every model registered with a risk tier and approval record",
+    "cpm_control": "model_registry:approved_by_required",
+    "evaluation_rule": "model_approved_exists"
+  }
+]

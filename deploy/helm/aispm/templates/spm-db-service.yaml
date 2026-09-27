@@ -1,0 +1,34 @@
+# deploy/helm/aispm/templates/spm-db-service.yaml
+#
+# ExternalName alias from `spm-db.<ns>.svc.cluster.local` to the CNPG
+# primary endpoint (`spm-db-rw.<ns>.svc.cluster.local`). This preserves
+# the well-known `spm-db.aispm.svc.cluster.local` hostname every
+# consumer's SPM_DB_URL hardcodes, without requiring per-service URL
+# overrides every time CNPG renames its underlying Services.
+#
+# Failover-safe: ExternalName is a CNAME, so when CNPG promotes a new
+# primary the underlying spm-db-rw retargets and our alias follows along
+# without any service edit.
+#
+# History: until May 2026 the chart also rendered a single-pod spm-db
+# StatefulSet + headless Service when `spmDb.enabled=true`.  That mode
+# is gone; CNPG (deploy/scripts/kind-databases-ha.sh) is the only
+# Postgres backend now.
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-db
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  type: ExternalName
+  externalName: {{ .Values.spmDb.externalName }}
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres

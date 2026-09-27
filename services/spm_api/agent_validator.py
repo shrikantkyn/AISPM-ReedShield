@@ -1,0 +1,234 @@
+"""Three-step agent.py validator used by ``POST /api/spm/agents``.
+
+Steps (all blocking unless noted):
+
+  1. ``ast.parse()``  — must be syntactically valid Python 3.12.
+  2. AST scan         — top-level ``async def main()`` must exist; the
+                        agent's container entrypoint launches that
+                        coroutine, so without it nothing would run.
+  3. Dry-import       — execute the module in an ephemeral subprocess
+                        to surface obvious ImportError / NameError /
+                        SyntaxError-at-import. Any ImportError on a
+                        third-party module is downgraded to a WARNING
+                        because Phase 1's spm-api container doesn't
+                        ship LangChain etc.; the customer's runtime
+                        container will. (Phase 2 spawns an agent-runtime
+                        container for this step instead.)
+
+Errors block (HTTP 422 with ``detail = res.errors``); warnings flow
+through to the client so the UI can surface them inline without
+preventing the upload.
+"""
+from __future__ import annotations
+
+import ast
+import logging
+import os as _os
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List
+
+log = logging.getLogger(__name__)
+
+
+# ─── Result type ────────────────────────────────────────────────────────────
+
+@dataclass
+class ValidationResult:
+    """Outcome of ``validate_agent_code()``.
+
+    ``ok`` is True iff no blocking errors fired. Warnings never affect
+    ``ok`` — they're informational only.
+    """
+    ok:       bool
+    errors:   List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+class ValidationError(Exception):
+    """Raised by callers that want to convert a failed result to an
+    exception (most don't — they just inspect the ValidationResult)."""
+
+
+# ─── Safe module loader ─────────────────────────────────────────────────────
+
+def validate_agent_module(path: str):
+    """Load an agent module safely — only paths inside AGENT_ALLOWLIST_DIR are accepted.
+
+    The allowlist directory is read from the ``AGENT_ALLOWLIST_DIR`` environment
+    variable (default: an ``agents/`` subdirectory next to this file).
+
+    Uses ``os.path.realpath`` so that symlinks and ``..`` traversal are both
+    resolved before comparison, preventing path-traversal bypasses.
+
+    Raises:
+        ValueError: if *path* resolves to a location outside the allowlist.
+    """
+    import importlib.util
+
+    allowlist = _os.path.realpath(
+        _os.environ.get(
+            "AGENT_ALLOWLIST_DIR",
+            _os.path.join(_os.path.dirname(__file__), "agents"),
+        )
+    )
+    real = _os.path.realpath(path)
+    if not (real.startswith(allowlist + _os.sep) or real == allowlist):
+        raise ValueError(
+            f"Agent path '{path}' is not inside allowlist '{allowlist}'"
+        )
+
+    spec = importlib.util.spec_from_file_location("_agent_under_test", real)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ─── Internal helpers ───────────────────────────────────────────────────────
+
+def _has_async_main(tree: ast.Module) -> bool:
+    """Return True iff the module body contains a top-level
+    ``async def main(...)`` declaration."""
+    for node in tree.body:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "main":
+            return True
+    return False
+
+
+# Subprocess script for the dry-import step. Written separately so the
+# string can be passed to ``python -c "..."`` without escaping issues.
+# Uses argv to receive the module path, avoiding f-string injection.
+# AGENT_ALLOWLIST_DIR env var is set by the caller to restrict loadable paths.
+_DRY_IMPORT_SCRIPT = r"""
+import importlib.util, os, sys, traceback
+
+def _validate_and_exec(path):
+    # Load a module only if its realpath is inside AGENT_ALLOWLIST_DIR.
+    allowlist = os.environ.get("AGENT_ALLOWLIST_DIR", "")
+    if allowlist:
+        allowlist_real = os.path.realpath(allowlist)
+        real = os.path.realpath(path)
+        if not (real.startswith(allowlist_real + os.sep) or real == allowlist_real):
+            raise ValueError(
+                "Agent path '{}' is not inside allowlist '{}'".format(path, allowlist_real)
+            )
+    else:
+        real = os.path.realpath(path)
+    spec = importlib.util.spec_from_file_location("agent_under_test", real)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+path = sys.argv[1]
+try:
+    _validate_and_exec(path)
+except SyntaxError as e:
+    print("SYNTAX_ERR: " + str(e))
+    sys.exit(0)
+except ImportError as e:
+    print("IMPORT_ERR: " + str(e))
+    sys.exit(0)
+except Exception as e:
+    print("RUNTIME_ERR: " + type(e).__name__ + ": " + str(e))
+    sys.exit(0)
+print("OK")
+"""
+
+
+# ─── Public API ─────────────────────────────────────────────────────────────
+
+def validate_agent_code(code: str, *,
+                          dry_import: bool = False,
+                          dry_import_timeout_s: float = 15.0,
+                          ) -> ValidationResult:
+    """Run syntax + AST checks and return the aggregated result.
+
+    SECURITY (audit finding C1): ``dry_import`` defaults to ``False``. The
+    dry-import step imports the uploaded module, which executes its top-level
+    code inside this API process — remote code execution for any agent-writer.
+    It is therefore disabled by default, and even when ``dry_import=True`` is
+    passed it only runs when ``AGENT_DRY_IMPORT_ENABLED=1`` is set in the
+    environment, which must ONLY be done in a locked-down executor tier
+    (``--network none``, read-only rootfs, non-root, seccomp, CPU limit) — never
+    in the API container. The syntax and AST checks below are pure analysis and
+    never execute the code.
+    """
+    res = ValidationResult(ok=True)
+
+    # 1. Syntax — Python parser is the source of truth.
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        res.ok = False
+        res.errors.append(
+            f"Python syntax error at line {e.lineno}: {e.msg}"
+        )
+        return res
+
+    # 2. async def main()
+    if not _has_async_main(tree):
+        res.ok = False
+        res.errors.append(
+            "Top-level `async def main()` is required — the agent "
+            "container's entrypoint awaits it."
+        )
+        return res
+
+    # 3. Dry-import — executes the uploaded module. Refuse unless explicitly
+    # enabled for a sandboxed executor tier (audit finding C1).
+    if dry_import and _os.environ.get("AGENT_DRY_IMPORT_ENABLED") != "1":
+        res.warnings.append(
+            "Dry-import validation is disabled (executing uploaded code in the "
+            "API process is unsafe). AST checks passed; the runtime container "
+            "performs the real import."
+        )
+        return res
+    if dry_import:
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "agent.py"
+            f.write_text(code)
+            try:
+                # Pass AGENT_ALLOWLIST_DIR as the tempdir so the subprocess
+                # allowlist check matches the path we generated.
+                env = {**_os.environ, "AGENT_ALLOWLIST_DIR": tmp}
+                p = subprocess.run(
+                    [sys.executable, "-c", _DRY_IMPORT_SCRIPT, str(f)],
+                    capture_output=True, text=True,
+                    timeout=dry_import_timeout_s,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                # Hung at import time — almost certainly a side-effecting
+                # top-level call. Surface as warning so the customer can
+                # see it; not an error because Phase 2's runtime container
+                # may have what they need.
+                res.warnings.append(
+                    f"Dry-import timed out after {dry_import_timeout_s:.0f}s "
+                    "(top-level code may be doing I/O at import — the runtime "
+                    "container may handle it differently)"
+                )
+                return res
+
+            stdout = (p.stdout or "").strip()
+            for line in stdout.splitlines():
+                if line.startswith("IMPORT_ERR:"):
+                    res.warnings.append(
+                        line[len("IMPORT_ERR:"):].strip()
+                        + "  (will be available in the agent-runtime container)"
+                    )
+                elif line.startswith("SYNTAX_ERR:"):
+                    # Should be impossible — ast.parse would have caught
+                    # it. Treat as belt-and-braces error.
+                    res.ok = False
+                    res.errors.append(line[len("SYNTAX_ERR:"):].strip())
+                elif line.startswith("RUNTIME_ERR:"):
+                    res.warnings.append(
+                        line[len("RUNTIME_ERR:"):].strip()
+                        + "  (agent runtime will surface this if it persists)"
+                    )
+
+    return res

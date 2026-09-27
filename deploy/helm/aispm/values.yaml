@@ -1,0 +1,475 @@
+# deploy/helm/aispm/values.yaml
+global:
+  imageRegistry: ""          # e.g. ghcr.io/your-org
+  imagePullPolicy: IfNotPresent
+  namespace: aispm
+  keycloak:
+    url: "http://keycloak.aispm.svc.cluster.local:8080"
+    realm: "aispm"
+    jwksUrl: "http://keycloak.aispm.svc.cluster.local:8080/realms/aispm/protocol/openid-connect/certs"
+    issuer: "https://aispm.lvh.me/realms/aispm"
+    audience: "aispm-ui"
+    clientSecret: "aispm-client-secret-changeme"
+  corsOrigins: "https://aispm.lvh.me"
+  internalServiceSecret: "internal-secret-changeme"
+
+# ── Keycloak ─────────────────────────────────────────────────────────────────
+keycloak:
+  adminPassword: "admin"
+  seedAdminPassword: "admin"
+  seedAuditorPassword: "auditor"
+  seedViewerPassword: "viewer"
+  seedAnalystPassword: "analyst"
+  # PostgreSQL backend — data persists across Keycloak pod restarts.
+  # The StatefulSet uses the default StorageClass (kind: hostPath-backed `standard`).
+  postgres:
+    password: "keycloak-pg-changeme-in-prod"
+    storageSize: "2Gi"
+
+  # ── Google identity provider (optional) ─────────────────────────────────────
+  # When BOTH clientId and clientSecret are non-empty, the keycloak-bootstrap
+  # Job auto-creates a "google" Identity Provider in the aispm realm so the
+  # hosted login page renders a "Sign in with Google" button. Idempotent.
+  #
+  # Get these from https://console.cloud.google.com/apis/credentials by creating
+  # an OAuth Client ID (Web application). Authorized redirect URI must be:
+  #   https://<ingress.host>/realms/aispm/broker/google/endpoint
+  #
+  # DO NOT commit real values here. Override via a gitignored values file:
+  #   helm upgrade aispm deploy/helm/aispm -f deploy/helm/aispm/values.dev.yaml \
+  #                                        -f /path/to/secrets.local.yaml
+  # …or via --set keycloak.google.clientId=...,keycloak.google.clientSecret=...
+  google:
+    clientId:     ""
+    clientSecret: ""
+    # `Trust Email = OFF` is the safer default — even when Google says
+    # email_verified=true, leaving it OFF forces a verification email on first
+    # broker login, blocking the cross-IdP email-takeover attack class.
+    trustEmail:   false
+    # Role granted to every Google-authenticated user. Applied via:
+    #   1. an Identity Provider Mapper that fires on first broker login
+    #      (covers all future Google sign-ups), AND
+    #   2. a one-shot reconciliation pass over existing Google-linked users
+    #      (covers users who logged in before this mapper was added).
+    # Set to "" to disable auto-role grants — users will sign in with no roles
+    # and 403 on every protected endpoint until manually granted via kcadm.
+    # See services/agent-orchestrator-service/dependencies/rbac.py for the
+    # role → permission matrix; "spm:admin" / "admin" grant ALL permissions,
+    # "spm:viewer" / "viewer" grant only session.read.
+    defaultRole:  "spm:admin"
+
+# ── Per-service image tags ───────────────────────────────────────────────────
+images:
+  api:             { repository: aispm-api,              tag: latest }
+  guardModel:      { repository: aispm-guard-model,      tag: latest }
+  garakRunner:     { repository: aispm-garak-runner,     tag: latest }
+  retrievalGw:     { repository: aispm-retrieval-gw,     tag: latest }
+  processor:       { repository: aispm-processor,        tag: latest }
+  policyDecider:   { repository: aispm-policy-decider,   tag: latest }
+  agent:           { repository: aispm-agent,            tag: latest }
+  memoryService:   { repository: aispm-memory,           tag: latest }
+  executor:        { repository: aispm-executor,         tag: latest }
+  toolParser:      { repository: aispm-tool-parser,      tag: latest }
+  outputGuard:     { repository: aispm-output-guard,     tag: latest }
+  freezeCtrl:      { repository: aispm-freeze-ctrl,      tag: latest }
+  policySimulator: { repository: aispm-policy-sim,       tag: latest }
+  spmApi:          { repository: aispm-spm-api,          tag: latest }
+  spmMcp:          { repository: aispm-spm-mcp,          tag: latest }
+  spmLlmProxy:     { repository: aispm-spm-llm-proxy,    tag: latest }
+  spmAggregator:   { repository: aispm-spm-aggregator,   tag: latest }
+  agentOrchestrator: { repository: aispm-agent-orchestrator, tag: latest }
+  threatHunter:    { repository: aispm-threat-hunter,    tag: latest }
+  ui:              { repository: aispm-ui,               tag: latest }
+  startupOrch:     { repository: aispm-startup-orch,     tag: latest }
+  flinkJob:        { repository: aispm-flink-pyjob,      tag: latest }
+  agentRuntime:    { repository: aispm-agent-runtime,    tag: latest }
+
+# ── Infrastructure images (upstream) ────────────────────────────────────────
+flink:
+  image: flink
+  tag: "1.18-scala_2.12"
+  # Resource requests/limits for JobManager and TaskManager pods.
+  # Sized for the 3-node kind dev cluster.  For production, raise limits
+  # to match flink-conf.yaml memory settings: JM=1600m process size →
+  # 2Gi limit; TM=2048m → 3Gi limit.
+  jobmanager:
+    # 2 replicas for k8s-native HA: one active leader, one hot standby.
+    # Leader election uses Kubernetes ConfigMaps/Leases (flink-rbac.yaml).
+    # Each JM gets its own RPC address injected at pod start (init container
+    # in flink-jobmanager-statefulset.yaml overwrites jobmanager.rpc.address).
+    replicas: 2
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+  taskmanager:
+    # 2 TMs is the always-on default since May 2026 — slot capacity must
+    # survive a 1-node loss without falling to zero.  Matches the JM's
+    # HA contract (2 JMs leader-electing).  Do NOT set this below 2.
+    replicas: 2
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1500Mi"
+      limits:
+        cpu: "2"
+        memory: "3Gi"
+
+  # ── JVM options — JDK 17+ + Apache Beam (PyFlink) compatibility ─────────────
+  # PyFlink runs Python operators through Apache Beam's portable runner,
+  # which uses reflection into ``java.base`` internals (ObjectStreamClass
+  # caches, NIO direct buffers, concurrent helpers). JDK 17 enforces module
+  # boundaries by default, so without these ``--add-opens`` flags every
+  # Python operator crashes with InaccessibleObjectException on the first
+  # checkpoint or buffer flush — symptom: TM restart count climbs by 1 every
+  # ~30s and the CEP job sticks in RESTARTING forever.
+  #
+  # The set below is the documented Beam-on-JDK-17 minimum (java.lang,
+  # java.io, java.util, sun.nio.ch) plus java.lang.reflect and java.nio
+  # which Beam's serialization layer touches under load. Operators
+  # extending the platform with custom Python operators that touch other
+  # internals can append to this list via a values override.
+  #
+  # Wired into both JM and TM JVMs via ``env.java.opts.all`` in
+  # templates/flink-conf-configmap.yaml.
+  jvmOpts: >-
+    --add-opens=java.base/java.lang=ALL-UNNAMED
+    --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+    --add-opens=java.base/java.io=ALL-UNNAMED
+    --add-opens=java.base/java.nio=ALL-UNNAMED
+    --add-opens=java.base/java.util=ALL-UNNAMED
+    --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+    --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+
+kafka:
+  image: confluentinc/cp-kafka
+  tag: "7.6.1"
+  # 3-broker KRaft quorum is the only supported topology since May 2026:
+  # tolerates 1 broker loss without dropping below ISR=2.  Do NOT downgrade
+  # `replicas` below 3 anywhere — RF=3, ISR=2 is an always-on contract.
+  replicas: 3
+  minInsyncReplicas: 2
+  clusterId: q1Enf0NkTvaBgXGsKZoeRA
+  storage: 10Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn
+  # ── Pod resources ──────────────────────────────────────────────────────
+  # Without these the StatefulSet runs as BestEffort QoS — kubelet's first
+  # choice when CPU pressure hits.  Under Flink CEP transaction-init storms
+  # the Raft heartbeat thread loses its scheduling slot, vote requests miss
+  # their (default 2s) deadline, leadership churns every few seconds, and
+  # the readiness probe falls over because the cluster is in constant
+  # metadata flux (observed 2026-05-02: epoch went 3219 → 3231 in 30s,
+  # all three brokers stayed 0/1 Ready for 26h).  Requesting 500m/1.5Gi
+  # makes the brokers Burstable so they get CFS shares ahead of best-effort
+  # pods; the 2 CPU / 2Gi limit covers the JVM heap + native overhead
+  # without exploding on a 4-node kind cluster (3 servers × 2-4 vCPU).
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1.5Gi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  # ── KRaft / controller timeouts ────────────────────────────────────────
+  # Defaults: requestTimeoutMs=2000, controllerQuorumElectionTimeoutMs=1000,
+  # controllerQuorumFetchTimeoutMs=2000.  On kind-on-Docker we routinely
+  # see 1-3s pauses from CRI-O scheduling + local-path fsync; raising these
+  # to 10s eliminates spurious leader churn without compromising failure
+  # detection (a real broker death still flips leadership in <30s).
+  controllerTimeouts:
+    request: 10000             # producer & inter-broker requests
+    quorumRequest: 10000       # KRaft RPC between voters
+    quorumElection: 10000      # how long a candidate waits for votes
+    quorumFetch: 10000         # how long a follower tolerates leader silence
+
+redis:
+  # Bitnami Redis HA (1 master + 3 replicas + 3 sentinels) is the only
+  # Redis backend since May 2026 — see kind-databases-ha.sh.  The chart
+  # no longer ships a built-in single-pod StatefulSet.
+  #
+  # Values below feed the configmap-platform-env REDIS_SENTINEL_HOSTS /
+  # REDIS_SENTINEL_MASTER keys that every service uses through
+  # platform_shared/redis.py:get_redis_client() to discover the current
+  # master via Sentinel.  Do NOT set replicas below 3 — Sentinel quorum
+  # requires at least 2 sentinels online to elect a new master, and 3
+  # gives 1-node-loss tolerance.
+  replicas: 3
+  sentinelMasterName: "mymaster"
+
+opa:
+  image: openpolicyagent/opa
+  tag: "0.70.0-static"   # static build avoids automaxprocs SIGSEGV under some Linux kernels
+
+spmDb:
+  # CNPG (CloudNativePG) is the only Postgres backend.  The chart no
+  # longer ships a built-in StatefulSet — see kind-databases-ha.sh for
+  # the cluster definition.  These values feed:
+  #   - SPM_DB_URL construction in db-seed-job, secrets, and the
+  #     agent-orchestrator / spm-aggregator deployments
+  #   - the ExternalName Service that aliases spm-db → CNPG primary
+  database: spm
+  user: spm_rw
+  # ExternalName the chart's spm-db Service points at.  Default targets
+  # the CNPG read-write Service (`spm-db-rw`) in the same namespace.
+  # Override per-environment if your CNPG cluster lives elsewhere.
+  externalName: spm-db-rw.aispm.svc.cluster.local
+
+# ── Platform env (non-secret) ────────────────────────────────────────────────
+# Mirrors x-common-env in compose.yml — keep these in sync.
+#
+# NOTE: KAFKA_BOOTSTRAP_SERVERS, KAFKA_REPLICATION_FACTOR, and
+# KAFKA_MIN_INSYNC_REPLICAS used to live here as static strings sized for
+# 3 brokers. That broke dev (kafka.replicas=1) two ways:
+#   1. Bootstrap list referenced kafka-1 / kafka-2 DNS names that don't
+#      resolve, sending the kafka-python client into a probe loop that
+#      eventually surfaced as `UnrecognizedBrokerVersion`.
+#   2. Topic creation with RF=3 failed `NOT_ENOUGH_REPLICAS` against a
+#      single broker.
+# These are now derived from .Values.kafka.replicas in the ConfigMap
+# template (configmap-platform-env.yaml) so the same chart works for
+# 1-broker dev and 3-broker prod without a values override.
+platformEnv:
+  OPA_URL: http://opa.aispm.svc.cluster.local:8181
+  JWT_ALGORITHM: RS256
+  GUARD_MODEL_URL: http://guard-model.aispm.svc.cluster.local:8200
+  GUARD_MODEL_ENABLED: "true"
+  # Raised from 60 → 180 s: guard-model warms up lazily in a background
+  # thread so the very first screening call blocks until the LLM loads
+  # (can be 120 s+ on a cold CPU). 60 s timed out before the model was
+  # ready, causing spurious "blocked by safety guard (timeout)" on cold start.
+  GUARD_MODEL_TIMEOUT: "180.0"
+  # Guard model's own per-LLM-call timeout — must be < GUARD_MODEL_TIMEOUT.
+  GUARD_LLM_TIMEOUT_S: "150"
+  # LlamaGuard escalation threshold: when the model returns verdict=allow
+  # but assigns a category, the api escalates to "block" only if the
+  # confidence score >= this value. 0.6 is the prod default — tuned to
+  # avoid false positives like "yes" → S2 → killed. Dev (values.dev.yaml)
+  # overrides this to 0.3 so simulator probes catch borderline jailbreaks
+  # at low confidence (e.g. obfuscated `ign-ore pre-vious in-struc-tions`
+  # which scored 0.30 and slipped through with the prod-tight threshold).
+  GUARD_BLOCK_SCORE: "0.6"
+  WS_WAIT_TIMEOUT_S: "10.0"
+  RATE_LIMIT_RPM: "60"
+  SERVICE_VERSION: "3.0.0"
+  ENVIRONMENT: production
+  REDIS_HOST: redis.aispm.svc.cluster.local
+  REDIS_PORT: "6379"
+  # Tenant config
+  TENANTS: "t1"
+  # Kafka ACL / partition tuning
+  KAFKA_ENABLE_ACLS: "false"
+  KAFKA_NUM_PARTITIONS: "3"
+  # CEP thresholds — mirror compose x-common-env defaults
+  CEP_SHORT_WINDOW_SEC: "120"
+  CEP_LONG_WINDOW_SEC: "3600"
+  CEP_SHORT_THRESHOLD: "5"
+  CEP_LONG_THRESHOLD: "15"
+  CEP_INTENT_DRIFT_THRESHOLD: "0.65"
+  CEP_SESSION_HISTORY_SIZE: "10"
+  # Memory TTLs
+  MEMORY_SESSION_TTL_SEC: "3600"
+  MEMORY_LONGTERM_TTL_SEC: "2592000"
+  MEMORY_SYSTEM_TTL_SEC: "86400"
+  # Output guard
+  OUTPUT_GUARD_LLM_ENABLED: "true"
+  # Points at guard-model — same host as GUARD_MODEL_URL (single screening service).
+  OUTPUT_GUARD_LLM_URL: http://guard-model.aispm.svc.cluster.local:8200
+  # Posture thresholds
+  POSTURE_ALLOW_THRESHOLD: "0.30"
+  POSTURE_ESCALATE_THRESHOLD: "0.70"
+  POSTURE_BLOCK_THRESHOLD: "0.70"
+  # Agent runtime control-plane (k8s-specific; not in compose)
+  AGENT_MCP_URL: http://spm-mcp.aispm.svc.cluster.local:8500/mcp
+  AGENT_LLM_BASE_URL: http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1
+  AGENT_CONTROLLER_URL: http://spm-api.aispm.svc.cluster.local:8092
+  AGENT_POD_NAMESPACE: aispm-agents
+  AGENT_RUNTIME_IMAGE: aispm-agent-runtime:latest
+  # LLM backend for guard-model and threat-hunting-agent.
+  # Left empty here — guard-model hydrates GROQ_BASE_URL from the Ollama
+  # integration config in spm-db at startup (int-017.config.base_url).
+  # Override in values.prod.yaml or via --set for clusters with a known
+  # in-cluster Ollama endpoint.  Don't use host-only aliases like
+  # host.docker.internal — they have no meaning inside a k8s network.
+  GROQ_BASE_URL: ""
+
+# ── Agent runtime ────────────────────────────────────────────────────────────
+agentRuntime:
+  namespace: aispm-agents
+  # RuntimeClass for kernel-boundary isolation. Empty default means
+  # "use the cluster's default OCI runtime" — cheap, but agents share
+  # the host kernel. Set this to a registered RuntimeClass:
+  #   - kata    (RKE2 prod with Kata Containers installed)
+  #   - gvisor  (kind, GKE, EKS, kubeadm — user-space sentry instead
+  #             of microVM, ~95% Linux ABI, real kernel boundary)
+  # Override per-environment:
+  #   values.dev.yaml  → "gvisor"
+  #   values.prod.yaml → "kata"
+  runtimeClassName: ""
+  defaultMemMi: 512
+  defaultCpuMillicores: 500
+
+  # Aggregate cap on the agent namespace. Hardcoded ceilings prevent
+  # a runaway tenant from exhausting the cluster.
+  quota:
+    enabled: true
+    maxPods:                     "100"
+    cpuRequests:                 "25"      # 25 vCPU total
+    memoryRequests:              "50Gi"
+    cpuLimits:                   "50"
+    memoryLimits:                "50Gi"
+    ephemeralStorageRequests:    "5Gi"
+    ephemeralStorageLimits:      "10Gi"
+    maxConfigMaps:               "200"     # one per agent + slack
+
+  # Per-container default limits (LimitRange backstop in case
+  # spawn_agent_pod ever forgets to set explicit limits).
+  # Note: maxCpu/maxMemory must accommodate the istio-proxy sidecar
+  # when sidecar injection is active — Istio defaults its sidecar to
+  # 2 vCPU / 1 GiB. The agent container itself uses 500m / 512Mi, so
+  # 2 / 1Gi is a real ceiling for it but a snug fit for the sidecar.
+  limits:
+    enabled: true
+    defaultCpu:                "500m"
+    defaultMemory:             "512Mi"
+    defaultEphemeralStorage:   "256Mi"
+    defaultRequestCpu:         "100m"
+    defaultRequestMemory:      "256Mi"
+    maxCpu:                    "2"
+    maxMemory:                 "1Gi"
+
+  # mTLS mode for the aispm namespace. PERMISSIVE works with Ambient
+  # peers from aispm-agents without waypoints; STRICT requires
+  # waypoint proxies for the cross-mode bridge.
+  mtlsMode: PERMISSIVE
+
+# ── Kyverno admission policies ─────────────────────────────────────────────
+# Cluster-wide policies (disallow-privileged, disallow-host-namespaces,
+# image-origin-allowlist) are applied directly via kubectl, not via this
+# chart, so they remain active even when the chart is helm-deleted. Only
+# the verifyImages policy is templated here because it depends on the
+# Cosign keypair which lives alongside the rest of the deployment values.
+kyverno:
+  verifyImages:
+    # Off by default. Local dev images aren't pushed to a registry and
+    # have no Cosign signature, so enabling on dev would block every
+    # agent pod. Turn on in values.prod.yaml.
+    enabled: false
+    # "Audit" emits PolicyReport entries without blocking. "Enforce"
+    # rejects unsigned images at admission.
+    mode: Audit
+    # Cosign public key (PEM). Generated with:
+    #   cosign generate-key-pair --output-key-prefix deploy/cosign/aispm-images
+    # Private key is in deploy/cosign/aispm-images.key (gitignored).
+    publicKey: |
+      -----BEGIN PUBLIC KEY-----
+      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEC/IrHdw9JZDJvCuC90CXeE7ZEsgE
+      SUkFuN8J7uoylaxTLuiZYTf2SuixBO39s1R1a806LzDU5RBJMEORIvl3gA==
+      -----END PUBLIC KEY-----
+
+# ── Secrets (safe defaults — override at deploy time via --set or Rancher UI) ─
+secrets:
+  spmDbPassword: "spmpass"     # matches hardcoded source defaults; override in prod
+  groqApiKey: "local"          # placeholder; set to real Groq key in prod
+  anthropicApiKey: ""
+  tavilyApiKey: ""
+  garakInternalSecret: "garak-dev-secret-changeme-in-prod"
+  spmInternalBootstrapSecret: ""
+  # Bearer token the threat-hunting-agent system service sends in its
+  # Authorization header when calling spm-llm-proxy.
+  #
+  # IMPORTANT: spm-llm-proxy validates only that the header EXISTS; the
+  # token's value is not validated against any allowlist (the actual
+  # upstream LLM auth is done by the proxy using ANTHROPIC_API_KEY /
+  # GROQ_API_KEY hydrated from the integrations table). So a literal
+  # placeholder like "local" is sufficient for development — it keeps
+  # services/spm_api/seed_db.py from logging "key empty" and lets the
+  # agent satisfy spm-llm-proxy's "Field required" validator.
+  #
+  # For production, OVERRIDE in your environment-specific values file
+  # with a real 32-byte URL-safe random string:
+  #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+  # so each environment has a distinct token (audit-trail friendly,
+  # makes per-agent token revocation possible later).
+  #
+  # Symptom of regression (token empty after redeploy): threat-hunting-
+  # agent logs `LLM invocation failed ... 422 ... 'authorization' Field
+  # required` every scan cycle. Fix is to ensure this default value
+  # makes it into platform-secrets via the chart, instead of relying on
+  # a manual `kubectl patch` that gets reverted on the next helm upgrade.
+  threatHuntingAgentLlmKey: "local"
+  # grafanaAdminPassword removed May 2026 (Grafana no longer in chart).
+
+# ── Ingress ──────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  host: aispm.example.com
+  tlsSecretName: aispm-tls
+  letsencryptEmail: ops@example.com
+  tls: true             # dev/prod both terminate TLS (selfsigned on dev)
+  certManager: true     # cert-manager issues + renews the cert
+  httpsRedirect: true   # 80 → 443 redirect at the Ingress
+  # cert-manager ClusterIssuer name used by both ui-ingress (annotation)
+  # and the Certificate resource. One of:
+  #   selfsigned-cluster-issuer  — dev / kind; browser will warn
+  #   letsencrypt-staging        — pre-prod; real ACME, untrusted CA
+  #   letsencrypt-prod           — production; trusted, strict rate-limit
+  # All three are rendered by templates/cert-manager-issuers.yaml. Default
+  # below is `letsencrypt-staging` — burning the prod-Let's-Encrypt rate
+  # limit on a misconfigured DNS will lock you out for a week, so we
+  # require an explicit flip in prod values to switch to `letsencrypt-prod`.
+  clusterIssuer: letsencrypt-staging
+
+# ── Runtime Security ─────────────────────────────────────────────────────────
+# Set falco.enabled=true only when Falco is installed (namespace falco must exist).
+# Set tetragon.enabled=true only when Tetragon DaemonSet is healthy.
+# Both require a kernel that exposes /sys/fs/bpf mounts — kind nodes
+# do, but if you see DaemonSet pods crashlooping with eBPF mount errors
+# in some other dev setup, leave both disabled.
+falco:
+  enabled: false   # prod: true (after: helm install falco falcosecurity/falco -n falco)
+
+tetragon:
+  enabled: false   # prod: true (after: helm install tetragon cilium/tetragon -n kube-system)
+
+# ── Observability ────────────────────────────────────────────────────────────
+# Prometheus + Grafana removed May 2026.  Their templates are gone from
+# the chart entirely; metrics scraping in dev relies on `kubectl top` +
+# Lens.  If you need them back, install kube-prometheus-stack out-of-band.
+
+# ── Application-tier replica counts ────────────────────────────────────
+# Default to 1 to keep the resource budget realistic on a 24 GB / 12-core
+# dev machine.  HA (replicas: 2 + topology spread) is supported by every
+# template — opt in per-environment by overriding `<svc>.replicas: 2`
+# in values.prod.yaml or a values.dev-multinode-ha.yaml.  Topology spread
+# + anti-affinity stay configured in the templates so flipping the count
+# is a one-value change.
+#
+# May 2026 incident: defaulting these to 2 stacked 22 services × 2
+# replicas × ~150 MB sidecar each on top of the stateful tier.  Total
+# memory requests exceeded the kind cluster's 20 GB allocation and the
+# entire api-server entered a death spiral.  Single-replica is the safe
+# baseline; HA is a deliberate per-environment choice.
+agent:                { replicas: 1 }
+api:                  { replicas: 1 }
+spmApi:               { replicas: 1 }
+spmMcp:               { replicas: 1 }
+spmAggregator:        { replicas: 1 }
+spmLlmProxy:          { replicas: 1 }
+agentOrchestrator:    { replicas: 1 }
+freezeController:     { replicas: 1 }
+threatHuntingAgent:   { replicas: 1 }
+guardModel:           { replicas: 1 }
+outputGuard:          { replicas: 1 }
+policySimulator:      { replicas: 1 }
+policyDecider:        { replicas: 1 }
+retrievalGateway:     { replicas: 1 }
+processor:            { replicas: 1 }
+executor:             { replicas: 1 }
+garakRunner:          { replicas: 1 }
+memoryService:        { replicas: 1 }
+toolParser:           { replicas: 1 }
+ui:                   { replicas: 1 }

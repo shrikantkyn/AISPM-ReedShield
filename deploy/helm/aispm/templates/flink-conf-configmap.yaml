@@ -1,0 +1,116 @@
+# deploy/helm/aispm/templates/flink-conf-configmap.yaml
+# Generated from flink/flink-conf.yaml (k8s variant — includes HA settings absent in compose)
+#
+# ── jobmanager.rpc.address override ─────────────────────────────────────────
+# The value "flink-jobmanager" below is a PLACEHOLDER. With 2 JM replicas,
+# each pod must advertise its own FQDN for RPC so TaskManagers can connect
+# back to the correct pod. The prep-flink-conf init container in
+# flink-jobmanager-statefulset.yaml replaces this line at pod startup with:
+#   jobmanager.rpc.address: <pod-hostname-fqdn>
+# e.g. flink-jobmanager-0.flink-jobmanager.aispm.svc.cluster.local
+# TaskManagers discover the ACTIVE JM via the HA ConfigMap/Lease (not this
+# address), so the static value is only ever used before the init container
+# runs — it is always overwritten before Flink starts.
+#
+# rest.address stays as the ClusterIP service "flink-jobmanager" — REST
+# clients (the submitter job, UI) should always hit the service, which
+# routes to whichever JM pod has its readiness probe satisfied.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flink-conf
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+data:
+  flink-conf.yaml: |
+    # Flink cluster configuration — used by both JobManager and TaskManager.
+    # Mounted read-only at /opt/flink/conf/flink-conf.yaml in both containers.
+    #
+    # See docs/plans/2026-04-24-pyflink-cep-migration.md Phase 0 for the
+    # rationale behind every value here.
+    
+    # ── JobManager ───────────────────────────────────────────────────────────────
+    jobmanager.rpc.address: flink-jobmanager
+    jobmanager.rpc.port: 6123
+    jobmanager.memory.process.size: 1600m
+    jobmanager.bind-host: 0.0.0.0
+    rest.address: flink-jobmanager
+    rest.bind-address: 0.0.0.0
+    rest.port: 8081
+    # Pin BLOB server to a fixed port so the Service can expose it.
+    # Default is 0 (random) — TM can't reach it through the Service otherwise.
+    blob.server.port: 6124
+
+    # ── TaskManager ──────────────────────────────────────────────────────────────
+    taskmanager.bind-host: 0.0.0.0
+    taskmanager.host: flink-taskmanager
+    taskmanager.numberOfTaskSlots: 3       # Matches KAFKA_NUM_PARTITIONS
+    taskmanager.memory.process.size: 2048m
+    
+    # ── Default parallelism — overridden by the job at submit time ──────────────
+    parallelism.default: 3
+    
+    # ── State backend: RocksDB with incremental checkpoints ──────────────────────
+    # Storage destinations are parameterized via values so dev (single-node,
+    # local-path RWO + RWX share) and multi-node (S3-compatible MinIO) can
+    # share one chart. file:///flink/* paths are PVCs mounted into the JM/TM
+    # containers; s3://... uses the flink-s3-fs-hadoop plugin (built into
+    # the image at /opt/flink/plugins/s3-fs-hadoop/) and the s3.* settings
+    # below.
+    state.backend.type: rocksdb
+    state.backend.incremental: true
+    state.checkpoints.dir: {{ .Values.flink.checkpointsDir | default "file:///flink/checkpoints" }}
+    state.savepoints.dir: {{ .Values.flink.savepointsDir | default "file:///flink/savepoints" }}
+    execution.checkpointing.interval: 60s
+    execution.checkpointing.mode: EXACTLY_ONCE
+    execution.checkpointing.timeout: 5min
+    execution.checkpointing.min-pause: 10s
+    execution.checkpointing.max-concurrent-checkpoints: 1
+    execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+
+    # ── High availability (k8s-native) ───────────────────────────────────────────
+    # Without this, JobManager restarts wipe in-memory job state — any client
+    # holding a job ID (browser tab, integration probe) gets 404 forever.
+    # storageDir holds JobGraph blobs and is shared across JMs — must be
+    # readable by all JM replicas. Set to s3://... when running multi-JM
+    # without RWX volumes.
+    high-availability.type: kubernetes
+    high-availability.storageDir: {{ .Values.flink.haStorageDir | default "file:///flink/ha" }}
+    kubernetes.cluster-id: aispm-flink
+    kubernetes.namespace: {{ .Values.global.namespace }}
+    {{- if .Values.flink.s3 }}
+
+    # ── S3 (MinIO or any S3-compatible) settings ────────────────────────────────
+    # Read by the flink-s3-fs-hadoop plugin. Path-style access required for
+    # MinIO; AWS supports virtual-hosted style by default. Credentials are
+    # in plain text here — fine for in-cluster MinIO with default minioadmin
+    # creds, but lift to a Secret + envsubst in a values.prod overlay.
+    s3.endpoint: {{ .Values.flink.s3.endpoint }}
+    s3.path.style.access: {{ .Values.flink.s3.pathStyleAccess | default true }}
+    s3.access-key: {{ .Values.flink.s3.accessKey }}
+    s3.secret-key: {{ .Values.flink.s3.secretKey }}
+    {{- end }}
+
+    # ── JVM options — JDK 17+ + PyFlink/Apache-Beam compatibility ───────────────
+    # The actual flag set is defined in values.yaml under ``flink.jvmOpts``
+    # so operators can extend it via a values override without editing this
+    # template.  See the comment block on that key for the full rationale;
+    # short version: JDK 17 module boundaries break Beam's reflection-based
+    # serialization layer unless these ``--add-opens`` flags are passed,
+    # symptom is a TM crash loop on every checkpoint/flush.
+    #
+    # Wired into BOTH JobManager and TaskManager JVMs by ``env.java.opts.all``.
+    env.java.opts.all: {{ .Values.flink.jvmOpts | quote }}
+
+    # ── Restart strategy ─────────────────────────────────────────────────────────
+    restart-strategy.type: exponential-delay
+    restart-strategy.exponential-delay.initial-backoff: 10s
+    restart-strategy.exponential-delay.max-backoff: 2min
+    restart-strategy.exponential-delay.backoff-multiplier: 2.0
+    restart-strategy.exponential-delay.reset-backoff-threshold: 10min
+    restart-strategy.exponential-delay.jitter-factor: 0.1

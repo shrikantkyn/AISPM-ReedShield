@@ -1,0 +1,539 @@
+# deploy/helm/aispm/templates/keycloak-deployment.yaml
+# Deploys Keycloak 24 backed by PostgreSQL (keycloak-postgres StatefulSet).
+# Data persists across pod restarts — realm config and seeded users survive.
+# Seeds the aispm realm + users via an init Job after Keycloak is healthy.
+{{- $kc := .Values.global.keycloak }}
+---
+# ── Deployment ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app: keycloak
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+      annotations:
+        # Istio sidecar disabled for the same reason as flink-jobmanager:
+        # the sidecar rewrites kubelet probes through pilot-agent's :15020
+        # status port and proxies to the app port (:8080).  During the
+        # 10-15 s JVM cold start the app is not yet bound to :8080, so every
+        # probe returns "connection refused".  If those failures exceed the
+        # liveness threshold the pod is killed before it ever becomes Ready
+        # — observed as a CrashLoopBackOff restart loop on cold clusters.
+        # Keycloak's traffic is fronted by the Istio VirtualService/Gateway
+        # for external access; internal callers (keycloak-bootstrap, spm-api
+        # JWKS fetch) use the ClusterIP service directly and are already
+        # inside the mesh — mTLS on the Keycloak pod itself adds no value.
+        sidecar.istio.io/inject: "false"
+    spec:
+      # ── Wait for Postgres before starting Keycloak ────────────────────────
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for keycloak-postgres to accept connections..."
+              until pg_isready -h keycloak-postgres.{{ .Values.global.namespace }}.svc.cluster.local -p 5432 -U keycloak -d keycloak; do
+                echo "  postgres not ready — retrying in 3s"
+                sleep 3
+              done
+              echo "keycloak-postgres is ready."
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: POSTGRES_PASSWORD
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:24.0
+          # start-dev: disables caching + enables debug UI; perfectly fine for
+          # dev.  The key difference from before is KC_DB=postgres — data is
+          # now stored in the keycloak-postgres PVC, not H2 in-memory.
+          args: ["start-dev"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-user
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-password
+            # ── PostgreSQL backend ──────────────────────────────────────────
+            - name: KC_DB
+              value: "postgres"
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://keycloak-postgres.{{ .Values.global.namespace }}.svc.cluster.local:5432/keycloak"
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: POSTGRES_USER
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: POSTGRES_PASSWORD
+            # ── General Keycloak settings ───────────────────────────────────
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HOSTNAME_STRICT_HTTPS
+              value: "false"
+            # Force the public-facing base URL so the JWT `iss` claim is always
+            # https://aispm.local/realms/aispm regardless of whether Keycloak
+            # sees HTTP internally (TLS terminated by Istio gateway).
+            - name: KC_HOSTNAME_URL
+              value: "https://{{ .Values.ingress.host }}"
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: {{ (.Values.keycloak.resources).requests.cpu | default "250m" }}
+              memory: {{ (.Values.keycloak.resources).requests.memory | default "768Mi" }}
+            limits:
+              cpu: {{ (.Values.keycloak.resources).limits.cpu | default "1000m" }}
+              memory: {{ (.Values.keycloak.resources).limits.memory | default "1500Mi" }}
+---
+# ── Service ───────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app: keycloak
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# ── Secret ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-secret
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  admin-user: "admin"
+  admin-password: {{ .Values.keycloak.adminPassword | quote }}
+  client-secret: {{ $kc.clientSecret | quote }}
+  seed-admin-password: {{ .Values.keycloak.seedAdminPassword | quote }}
+  seed-auditor-password: {{ .Values.keycloak.seedAuditorPassword | quote }}
+  seed-viewer-password: {{ .Values.keycloak.seedViewerPassword | quote }}
+  seed-analyst-password: {{ .Values.keycloak.seedAnalystPassword | default "analyst" | quote }}
+  # Google IdP credentials. Empty by default — bootstrap Job skips IdP creation
+  # if either is empty. Override via a gitignored values file or --set.
+  google-client-id:     {{ (.Values.keycloak.google).clientId     | default "" | quote }}
+  google-client-secret: {{ (.Values.keycloak.google).clientSecret | default "" | quote }}
+---
+# ── Bootstrap Job ─────────────────────────────────────────────────────────────
+# Runs setup-realm.sh + seed-users.sh once after Keycloak becomes healthy.
+# The scripts are baked into the Keycloak image via a ConfigMap + initContainer
+# pattern — we mount them as a ConfigMap and exec them from inside the pod.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-bootstrap
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    # Helm hook: run after all resources are deployed
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      annotations:
+        # Disable Istio sidecar injection — the sidecar keeps the pod alive
+        # after the bootstrap container exits, which prevents the Job from
+        # ever reaching Completed status. The job talks to in-cluster services
+        # directly and does not need mTLS.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: quay.io/keycloak/keycloak:24.0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              KC_URL="http://keycloak.{{ .Values.global.namespace }}.svc.cluster.local:8080"
+              KCADM="/opt/keycloak/bin/kcadm.sh"
+              REALM="aispm"
+              CLIENT_ID="aispm-ui"
+
+              echo "Waiting for Keycloak..."
+              # curl is not available in the Keycloak UBI Micro image — use
+              # bash /dev/tcp to check port 8080 is accepting connections, then
+              # verify kcadm.sh can actually authenticate before proceeding.
+              RETRIES=0; MAX_RETRIES=60  # 60 × 5s = 5 min
+              until (echo > /dev/tcp/keycloak/8080) 2>/dev/null; do
+                sleep 5; RETRIES=$((RETRIES+1))
+                [ "$RETRIES" -ge "$MAX_RETRIES" ] && { echo "Keycloak not ready after $((MAX_RETRIES*5))s"; exit 1; }
+              done
+              # Port is open — give Keycloak 5 more seconds to finish HTTP init
+              sleep 5
+              echo "Keycloak port open, verifying kcadm auth..."
+              RETRIES=0
+              until "$KCADM" config credentials \
+                  --server "$KC_URL" --realm master \
+                  --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null; do
+                sleep 5; RETRIES=$((RETRIES+1))
+                [ "$RETRIES" -ge 12 ] && { echo "kcadm auth failed after 60s"; exit 1; }
+              done
+              echo "Keycloak ready."
+
+              # ── Master realm: security-admin-console redirect URIs ──────────
+              # KC_HOSTNAME_URL above forces all generated URLs to use
+              # https://{ingress.host}, but the security-admin-console client's
+              # default redirectUris ("/admin/master/console/*") are
+              # path-relative and Keycloak rejects them when the request comes
+              # in via a different host (e.g. `kubectl port-forward` on
+              # localhost:8180).  Pin the client to an explicit allow-list of
+              # URLs we actually use in dev so the admin UI loads from either
+              # the Istio ingress or a port-forward without "Invalid parameter:
+              # redirect_uri".  Idempotent — kcadm update is a PUT.
+              SAC_UUID=$("$KCADM" get clients -r master \
+                -q clientId=security-admin-console \
+                --fields id --format csv --noquotes 2>/dev/null \
+                | tail -1 | tr -d '\r')
+              if [ -n "$SAC_UUID" ]; then
+                "$KCADM" update clients/"$SAC_UUID" -r master \
+                  -s 'redirectUris=["/admin/master/console/*","https://{{ .Values.ingress.host }}/admin/master/console/*","http://localhost:8180/admin/master/console/*"]' \
+                  -s 'webOrigins=["+"]' \
+                  && echo "master/security-admin-console redirect URIs pinned"
+              else
+                echo "WARN: master/security-admin-console client not found — skipping redirect URI pin"
+              fi
+
+              # Realm (idempotent create + idempotent settings update).
+              # registrationEmailAsUsername=false → users log in with their
+              # username (viewer, auditor…) not their email address.
+              # loginWithEmailAllowed=true keeps "Email" as an alternative.
+              "$KCADM" get realms/"$REALM" > /dev/null 2>&1 || \
+                "$KCADM" create realms \
+                  -s realm="$REALM" -s enabled=true -s displayName="AISPM" \
+                  -s registrationEmailAsUsername=false \
+                  -s loginWithEmailAllowed=true
+              # Reconcile realm settings on re-runs (realm already exists).
+              "$KCADM" update realms/"$REALM" \
+                -s registrationEmailAsUsername=false \
+                -s loginWithEmailAllowed=true 2>/dev/null || true
+
+              # Client (idempotent)
+              CLIENT_EXISTS=$("$KCADM" get clients -r "$REALM" \
+                --fields clientId -q clientId="$CLIENT_ID" 2>/dev/null \
+                | grep -c "\"$CLIENT_ID\"" || true)
+              if [ "$CLIENT_EXISTS" -eq 0 ]; then
+                # publicClient=true: browser SPAs cannot keep a client secret;
+                # directAccessGrantsEnabled allows the username/password login flow.
+                "$KCADM" create clients -r "$REALM" \
+                  -s clientId="$CLIENT_ID" \
+                  -s publicClient=true \
+                  -s directAccessGrantsEnabled=true \
+                  -s 'redirectUris=["*"]' \
+                  -s 'webOrigins=["*"]'
+              else
+                # Idempotent: ensure any pre-existing confidential client is switched
+                # to public so the browser login flow works without a secret.
+                EXISTING_UUID=$("$KCADM" get clients -r "$REALM" \
+                  --fields id,clientId 2>/dev/null \
+                  | grep -B1 "\"$CLIENT_ID\"" | grep '"id"' \
+                  | sed 's/.*: "\(.*\)".*/\1/' | tr -d '[:space:]')
+                [ -n "$EXISTING_UUID" ] && \
+                  "$KCADM" update clients/"$EXISTING_UUID" -r "$REALM" \
+                    -s publicClient=true 2>/dev/null || true
+              fi
+
+              # Roles (idempotent)
+              for ROLE in admin auditor viewer "spm:admin" "spm:auditor" "spm:viewer" "spm:security-analyst"; do
+                "$KCADM" get-roles -r "$REALM" --rolename "$ROLE" > /dev/null 2>&1 || \
+                  "$KCADM" create roles -r "$REALM" -s name="$ROLE"
+              done
+
+              # Audience mapper — adds aispm-ui to the `aud` claim so
+              # backend services can verify audience=aispm-ui (idempotent).
+              CLIENT_UUID=$("$KCADM" get clients -r "$REALM" \
+                --fields id,clientId 2>/dev/null \
+                | grep -B1 "\"$CLIENT_ID\"" | grep '"id"' \
+                | sed 's/.*: "\(.*\)".*/\1/' | tr -d '[:space:]')
+              if [ -n "$CLIENT_UUID" ]; then
+                MAPPER_EXISTS=$("$KCADM" get clients/"$CLIENT_UUID"/protocol-mappers/models \
+                  -r "$REALM" 2>/dev/null | grep -c "aispm-ui-audience" || true)
+                if [ "$MAPPER_EXISTS" -eq 0 ]; then
+                  "$KCADM" create clients/"$CLIENT_UUID"/protocol-mappers/models \
+                    -r "$REALM" \
+                    -s name=aispm-ui-audience \
+                    -s protocol=openid-connect \
+                    -s protocolMapper=oidc-audience-mapper \
+                    -s 'config={"included.client.audience":"aispm-ui","access.token.claim":"true","id.token.claim":"false"}' \
+                    && echo "Audience mapper created" || echo "Audience mapper already exists"
+                else
+                  echo "Audience mapper already present"
+                fi
+              fi
+
+              # tenant_id hardcoded claim mapper — adds tenant_id="t1" to
+              # every access token so backend services can read it without
+              # requiring per-user attributes (idempotent).
+              if [ -n "$CLIENT_UUID" ]; then
+                TENANT_MAPPER_EXISTS=$("$KCADM" get clients/"$CLIENT_UUID"/protocol-mappers/models \
+                  -r "$REALM" 2>/dev/null | grep -c "tenant-id-mapper" || true)
+                if [ "$TENANT_MAPPER_EXISTS" -eq 0 ]; then
+                  "$KCADM" create clients/"$CLIENT_UUID"/protocol-mappers/models \
+                    -r "$REALM" \
+                    -s name=tenant-id-mapper \
+                    -s protocol=openid-connect \
+                    -s protocolMapper=oidc-hardcoded-claim-mapper \
+                    -s 'config={"claim.name":"tenant_id","claim.value":"t1","access.token.claim":"true","id.token.claim":"false","userinfo.token.claim":"false"}' \
+                    && echo "tenant_id mapper created" || echo "tenant_id mapper already exists"
+                else
+                  echo "tenant_id mapper already present"
+                fi
+              fi
+
+              # Seed users (idempotent)
+              # firstName + lastName required by Keycloak 24's Declarative User
+              # Profile — omitting them causes "Account is not fully set up" on login.
+              create_user() {
+                local username="$1" password="$2" role="$3" email="$4" firstname="$5" lastname="$6"
+                EXISTS=$("$KCADM" get users -r "$REALM" \
+                  --fields username -q username="$username" 2>/dev/null \
+                  | grep -c "\"$username\"" || true)
+                if [ "$EXISTS" -eq 0 ]; then
+                  "$KCADM" create users -r "$REALM" \
+                    -s username="$username" -s email="$email" \
+                    -s firstName="$firstname" -s lastName="$lastname" \
+                    -s enabled=true -s emailVerified=true \
+                    -s 'requiredActions=[]' \
+                    -s "credentials=[{\"type\":\"password\",\"value\":\"$password\",\"temporary\":false}]"
+                  echo "Created: $username"
+                else
+                  # Always reconcile the password so re-runs after a values change take effect.
+                  USER_ID=$("$KCADM" get users -r "$REALM" -q username="$username" \
+                    --fields id 2>/dev/null | grep '"id"' | head -1 | sed 's/.*"id" *: *"\([^"]*\)".*/\1/')
+                  if [ -n "$USER_ID" ]; then
+                    "$KCADM" set-password -r "$REALM" --userid "$USER_ID" \
+                      --new-password "$password" 2>/dev/null \
+                      && echo "Password synced: $username" || echo "WARN: password sync failed for $username"
+                  fi
+                  echo "Exists: $username"
+                fi
+                "$KCADM" add-roles -r "$REALM" \
+                  --uusername "$username" --rolename "$role" 2>/dev/null || true
+              }
+
+              create_user admin   "$SEED_ADMIN_PASSWORD"   admin   "admin@aispm.local"   "Admin"    "User"
+              create_user auditor "$SEED_AUDITOR_PASSWORD" auditor "auditor@aispm.local" "Auditor"  "User"
+              create_user viewer  "$SEED_VIEWER_PASSWORD"  viewer  "viewer@aispm.local"  "Viewer"   "User"
+              create_user analyst "$SEED_ANALYST_PASSWORD" analyst "analyst@aispm.local" "Analyst"  "User"
+
+              # Assign prefixed roles so both plain and spm: checks pass
+              "$KCADM" add-roles -r "$REALM" --uusername admin   --rolename "spm:admin"            2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername auditor --rolename "spm:auditor"          2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername viewer  --rolename "spm:viewer"           2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername analyst --rolename "spm:security-analyst" 2>/dev/null || true
+
+              # ── Google identity provider (idempotent, optional) ──────────────
+              # Creates a "google" social IdP in the aispm realm so the hosted
+              # login page renders a "Sign in with Google" button. Only fires
+              # when both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set —
+              # leaves the realm untouched in deployments that don't want SSO.
+              #
+              # Trust Email is forced OFF: even if Google sets email_verified=
+              # true, requiring Keycloak to verify on first broker login blocks
+              # the cross-IdP email-takeover attack class (an attacker with a
+              # Google account matching a victim's email cannot silently link
+              # to the victim's pre-existing local account).
+              if [ -n "${GOOGLE_CLIENT_ID:-}" ] && [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
+                GOOGLE_EXISTS=$("$KCADM" get identity-provider/instances -r "$REALM" \
+                  --fields alias 2>/dev/null \
+                  | grep -c '"google"' || true)
+                # Build the config JSON via printf — keeps the manifest YAML
+                # valid (no heredoc, no embedded literal newlines) and keeps
+                # the secrets in env vars rather than templated into the Job
+                # spec where `kubectl describe job` would echo them.
+                GOOGLE_CONFIG=$(printf '{"clientId":"%s","clientSecret":"%s","defaultScope":"openid email profile","syncMode":"IMPORT"}' "$GOOGLE_CLIENT_ID" "$GOOGLE_CLIENT_SECRET")
+                if [ "$GOOGLE_EXISTS" -eq 0 ]; then
+                  "$KCADM" create identity-provider/instances -r "$REALM" \
+                    -s alias=google \
+                    -s providerId=google \
+                    -s enabled=true \
+                    -s trustEmail={{ (.Values.keycloak.google).trustEmail | default false }} \
+                    -s storeToken=false \
+                    -s addReadTokenRoleOnCreate=false \
+                    -s firstBrokerLoginFlowAlias="first broker login" \
+                    -s "config=$GOOGLE_CONFIG" \
+                    && echo "Google identity provider created"
+                else
+                  # Update credentials in place — handles client-secret rotation
+                  # without manual intervention. Other fields (enabled, trust
+                  # email, etc.) are also re-asserted to match values.yaml.
+                  "$KCADM" update identity-provider/instances/google -r "$REALM" \
+                    -s enabled=true \
+                    -s trustEmail={{ (.Values.keycloak.google).trustEmail | default false }} \
+                    -s "config=$GOOGLE_CONFIG" \
+                    && echo "Google identity provider updated"
+                fi
+
+                # ── Auto-role for Google users (idempotent) ───────────────────
+                # Two-pronged: (1) IdP mapper fires on every NEW broker login;
+                # (2) reconciliation pass grants the role to ALL existing
+                # google-linked users (so users who logged in before this
+                # mapper was added don't have to be re-created manually).
+                GOOGLE_ROLE='{{ (.Values.keycloak.google).defaultRole | default "" }}'
+                if [ -n "$GOOGLE_ROLE" ]; then
+                  GOOGLE_MAPPER_CONFIG=$(printf '{"role":"%s","syncMode":"INHERIT"}' "$GOOGLE_ROLE")
+
+                  # (1) IdP mapper
+                  MAPPER_EXISTS=$("$KCADM" get identity-provider/instances/google/mappers \
+                    -r "$REALM" --fields name 2>/dev/null \
+                    | grep -c '"default-role-mapper"' || true)
+                  if [ "$MAPPER_EXISTS" -eq 0 ]; then
+                    "$KCADM" create identity-provider/instances/google/mappers -r "$REALM" \
+                      -s name=default-role-mapper \
+                      -s identityProviderAlias=google \
+                      -s identityProviderMapper=oidc-hardcoded-role-idp-mapper \
+                      -s "config=$GOOGLE_MAPPER_CONFIG" \
+                      && echo "Google default-role mapper created (role=$GOOGLE_ROLE)" \
+                      || echo "WARN: failed to create Google default-role mapper"
+                  else
+                    MAPPER_ID=$("$KCADM" get identity-provider/instances/google/mappers \
+                      -r "$REALM" --fields id,name 2>/dev/null \
+                      | grep -B1 '"default-role-mapper"' | grep '"id"' \
+                      | sed 's/.*: "\(.*\)".*/\1/' | tr -d '[:space:]')
+                    [ -n "$MAPPER_ID" ] && \
+                      "$KCADM" update identity-provider/instances/google/mappers/"$MAPPER_ID" \
+                        -r "$REALM" \
+                        -s name=default-role-mapper \
+                        -s identityProviderMapper=oidc-hardcoded-role-idp-mapper \
+                        -s "config=$GOOGLE_MAPPER_CONFIG" \
+                      && echo "Google default-role mapper updated (role=$GOOGLE_ROLE)"
+                  fi
+
+                  # (2) Reconcile existing Google-linked users.
+                  # Inline python parses the user list JSON; for each user we
+                  # check federated-identity for "google" and grant the role.
+                  # Inline (no heredoc) so YAML literal block stays valid.
+                  USER_PAIRS=$("$KCADM" get users -r "$REALM" \
+                    --fields id,username -q max=1000 2>/dev/null \
+                    | python3 -c "import json,sys; [print(u.get('id','')+' '+u.get('username','')) for u in json.load(sys.stdin)]" 2>/dev/null || true)
+                  echo "$USER_PAIRS" | while read -r uid uname; do
+                    [ -z "$uid" ] && continue
+                    HAS_GOOGLE=$("$KCADM" get "users/$uid/federated-identity" -r "$REALM" 2>/dev/null \
+                      | grep -c '"identityProvider" : "google"' || true)
+                    if [ "$HAS_GOOGLE" -gt 0 ]; then
+                      "$KCADM" add-roles -r "$REALM" --uusername "$uname" --rolename "$GOOGLE_ROLE" 2>/dev/null \
+                        && echo "  granted $GOOGLE_ROLE to existing Google user: $uname" \
+                        || true  # no-op if already assigned
+                    fi
+                  done
+                fi
+              else
+                echo "Google IdP credentials not set — skipping (set keycloak.google.{clientId,clientSecret} to enable)"
+              fi
+
+              echo "Bootstrap complete."
+          env:
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-user
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-password
+            - name: AISPM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: client-secret
+            - name: SEED_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-admin-password
+            - name: SEED_AUDITOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-auditor-password
+            - name: SEED_VIEWER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-viewer-password
+            - name: SEED_ANALYST_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-analyst-password
+            # Google IdP credentials — empty when not configured. The
+            # bootstrap script branches on these being non-empty.
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: google-client-id
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: google-client-secret

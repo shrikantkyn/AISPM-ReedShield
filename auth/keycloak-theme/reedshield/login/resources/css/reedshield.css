@@ -1,0 +1,180 @@
+/* ReedShield — Keycloak login theme overrides
+ * Layered on top of the stock keycloak login.css + PatternFly. Restyles the
+ * hosted credential page to ReedShield's light-premium enterprise look. Branding
+ * only: no markup or form behavior is changed here.
+ */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --reedshield-bg: #FAFAF9;
+  --reedshield-surface: #FFFFFF;
+  --reedshield-border: #E7E5E4;
+  --reedshield-border-strong: #D6D3D1;
+  --reedshield-text: #1C1917;
+  --reedshield-text-2: #57534E;
+  --reedshield-text-3: #78716C;
+  --reedshield-brand: #7C3AED;
+  --reedshield-brand-700: #6D28D9;
+  --reedshield-brand-50: #F5F3FF;
+  --reedshield-red: #DC2626;
+  --reedshield-green: #16A34A;
+  --reedshield-font: 'Inter', 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* ── Page canvas ─────────────────────────────────────────────────────────── */
+html { -webkit-font-smoothing: antialiased; }
+.login-pf { background: var(--reedshield-bg) !important; height: 100%; }
+.login-pf body,
+body.login-pf {
+  background: var(--reedshield-bg) !important;
+  font-family: var(--reedshield-font) !important;
+  color: var(--reedshield-text);
+}
+/* Kill the stock Keycloak background image + gradient. */
+.login-pf-page { padding-top: 0 !important; }
+.login-pf body { background-image: none !important; }
+
+/* ── Brand header ────────────────────────────────────────────────────────── */
+.login-pf-page .login-pf-header { margin-bottom: 28px; }
+#kc-header { padding-top: 56px; }
+#kc-header-wrapper {
+  /* Hide the default realm-name text; show the ReedShield logo instead. */
+  font-size: 0 !important;
+  color: transparent !important;
+  white-space: nowrap;
+  background-image: url('../img/reedshield-logo.svg');
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  height: 44px;
+  padding: 0 !important;
+  margin: 0 auto;
+  max-width: 200px;
+}
+
+/* ── Card ────────────────────────────────────────────────────────────────── */
+.login-pf-page .card-pf {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 34px 34px 30px;
+  background: var(--reedshield-surface);
+  border: 1px solid var(--reedshield-border);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(28,25,23,0.04), 0 8px 28px rgba(28,25,23,0.06);
+}
+#kc-content-wrapper { margin-top: 0; }
+
+/* Card heading (e.g. "Sign in to your account") */
+#kc-page-title {
+  font-family: var(--reedshield-font);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--reedshield-text);
+  margin-bottom: 4px;
+}
+
+/* ── Labels + inputs ─────────────────────────────────────────────────────── */
+.pf-c-form__label, label {
+  font-family: var(--reedshield-font);
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--reedshield-text-2) !important;
+}
+.pf-c-form-control,
+input[type="text"], input[type="password"], input[type="email"], input[type="number"] {
+  font-family: var(--reedshield-font) !important;
+  font-size: 14px !important;
+  color: var(--reedshield-text) !important;
+  background: var(--reedshield-surface) !important;
+  border: 1px solid var(--reedshield-border-strong) !important;
+  border-radius: 8px !important;
+  height: 42px !important;
+  padding: 0 12px !important;
+  box-shadow: none !important;
+  transition: border-color .15s, box-shadow .15s;
+}
+.pf-c-form-control:focus,
+input[type="text"]:focus, input[type="password"]:focus, input[type="email"]:focus {
+  border-color: var(--reedshield-brand) !important;
+  box-shadow: 0 0 0 3px rgba(124,58,237,0.18) !important;
+  outline: none !important;
+}
+.pf-c-form-control::placeholder { color: var(--reedshield-text-3) !important; }
+
+/* Password visibility toggle sits flush inside the input group */
+.pf-c-input-group { border-radius: 8px; }
+.pf-c-input-group .pf-c-button.pf-m-control {
+  border: 1px solid var(--reedshield-border-strong) !important;
+  border-left: none !important;
+  border-radius: 0 8px 8px 0 !important;
+  background: var(--reedshield-surface) !important;
+  color: var(--reedshield-text-3) !important;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.pf-c-button.pf-m-primary,
+input[type="submit"].pf-m-primary,
+#kc-login {
+  font-family: var(--reedshield-font) !important;
+  font-size: 14.5px !important;
+  font-weight: 600 !important;
+  background: var(--reedshield-brand) !important;
+  border: none !important;
+  border-radius: 8px !important;
+  height: 44px !important;
+  color: #fff !important;
+  box-shadow: none !important;
+  transition: background .15s;
+}
+.pf-c-button.pf-m-primary:hover, #kc-login:hover { background: var(--reedshield-brand-700) !important; }
+.pf-c-button.pf-m-primary:focus, #kc-login:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(124,58,237,0.35) !important;
+}
+.pf-c-button.pf-m-block { width: 100%; }
+
+/* Secondary / social buttons */
+.pf-c-button.pf-m-control,
+.kc-social-item {
+  font-family: var(--reedshield-font) !important;
+  font-weight: 600 !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--reedshield-border-strong) !important;
+  background: var(--reedshield-surface) !important;
+  color: var(--reedshield-text) !important;
+}
+.kc-social-item:hover { background: var(--reedshield-bg) !important; }
+
+/* ── Links ───────────────────────────────────────────────────────────────── */
+a, #kc-registration a, #kc-info-wrapper a, .login-pf-page .pf-c-login__main-footer-links-item-link {
+  color: var(--reedshield-brand-700) !important;
+  font-weight: 500;
+  text-decoration: none;
+}
+a:hover { color: var(--reedshield-brand) !important; text-decoration: underline; }
+
+/* "New user? Register" footer strip */
+#kc-registration, #kc-info { font-size: 13.5px; color: var(--reedshield-text-2); }
+
+/* ── Checkbox (Remember me) ──────────────────────────────────────────────── */
+.pf-c-check__label, .checkbox label { font-size: 13.5px !important; color: var(--reedshield-text-2) !important; }
+.pf-c-check__input:checked { accent-color: var(--reedshield-brand); }
+
+/* ── Alerts (errors / info) ──────────────────────────────────────────────── */
+.pf-c-alert {
+  font-family: var(--reedshield-font) !important;
+  border-radius: 10px !important;
+  border: 1px solid var(--reedshield-border) !important;
+  font-size: 13.5px;
+}
+.pf-c-alert.pf-m-danger, .alert-error {
+  border-color: color-mix(in srgb, var(--reedshield-red) 40%, var(--reedshield-border)) !important;
+  background: color-mix(in srgb, var(--reedshield-red) 8%, #fff) !important;
+}
+.pf-c-alert.pf-m-danger .pf-c-alert__title, .alert-error .kc-feedback-text { color: var(--reedshield-red) !important; }
+.pf-c-alert.pf-m-success { background: color-mix(in srgb, var(--reedshield-green) 8%, #fff) !important; }
+
+/* ── Footer / misc ───────────────────────────────────────────────────────── */
+#kc-info-wrapper { background: transparent !important; border: none !important; }
+.login-pf-page .login-pf-signup { color: var(--reedshield-text-2); }

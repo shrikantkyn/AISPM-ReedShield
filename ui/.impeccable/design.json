@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-15T12:10:00+05:30",
+  "title": "Design System: ReedShield",
+  "extensions": {
+    "colorMeta": {
+      "brand": { "role": "primary", "displayName": "Brand Violet", "canonical": "#7C3AED", "tonalRamp": ["#F5F3FF", "#EDE9FE", "#DDD6FE", "#C4B5FD", "#A78BFA", "#8B5CF6", "#7C3AED", "#6D28D9", "#5B21B6", "#4C1D95"] },
+      "text": { "role": "neutral", "displayName": "Ink / Text", "canonical": "#1C1917", "tonalRamp": ["#FAFAF9", "#F5F5F4", "#E7E5E4", "#D6D3D1", "#A8A29E", "#78716C", "#57534E", "#44403C", "#292524", "#1C1917", "#0C0A09"] },
+      "bg": { "role": "neutral", "displayName": "Page / Surface", "canonical": "#FAFAF9", "tonalRamp": ["#FFFFFF", "#FAFAF9", "#F5F5F4", "#E7E5E4", "#D6D3D1"] },
+      "status-critical": { "role": "tertiary", "displayName": "Critical (red)", "canonical": "#DC2626", "tonalRamp": ["#FEF2F2", "#FCA5A5", "#DC2626", "#991B1B"] },
+      "status-high": { "role": "tertiary", "displayName": "High (orange)", "canonical": "#EA580C", "tonalRamp": ["#FFF7ED", "#FDBA74", "#EA580C", "#9A3412"] },
+      "status-medium": { "role": "tertiary", "displayName": "Medium (amber)", "canonical": "#D97706", "tonalRamp": ["#FFFBEB", "#FCD34D", "#D97706", "#92400E"] },
+      "status-low": { "role": "tertiary", "displayName": "Low (green)", "canonical": "#16A34A", "tonalRamp": ["#F0FDF4", "#86EFAC", "#16A34A", "#166534"] },
+      "status-info": { "role": "tertiary", "displayName": "Info (cyan)", "canonical": "#0891B2", "tonalRamp": ["#ECFEFF", "#67E8F9", "#0891B2", "#155E75"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Hero / page title", "purpose": "Marketing and page hero headings; the single H1." },
+      "headline": { "displayName": "Section / page heading", "purpose": "Console page titles and section headings." },
+      "title": { "displayName": "Card title", "purpose": "Card and panel titles." },
+      "label": { "displayName": "Column / field label", "purpose": "Table and small section labels only; used sparingly, not as a decorative kicker." },
+      "mono": { "displayName": "Reference", "purpose": "Identifiers, dates, timestamps, and hashes." }
+    },
+    "shadows": [
+      { "name": "xs", "value": "0 1px 2px rgba(28,25,23,0.04)", "purpose": "Resting cards and metric tiles." },
+      { "name": "sm", "value": "0 1px 2px rgba(28,25,23,0.05), 0 1px 3px rgba(28,25,23,0.05)", "purpose": "Slightly raised cards and inputs on focus." },
+      { "name": "md", "value": "0 4px 12px rgba(28,25,23,0.08)", "purpose": "Hover lift on interactive cards." },
+      { "name": "lg", "value": "0 8px 28px rgba(28,25,23,0.10)", "purpose": "Floating overlays: menus, popovers, modals." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Most transitions; 150ms." },
+      { "name": "dropdown", "value": "opacity + translateY(-4px) over 150ms", "purpose": "Menus and popovers appearing." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "xl", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The brand action; one per view at most.",
+      "html": "<button class=\"ds-btn-primary\">Get Started</button>",
+      "css": ".ds-btn-primary { font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; font-size: 14.5px; font-weight: 600; height: 40px; padding: 0 16px; background: #7C3AED; color: #FFFFFF; border: none; border-radius: 8px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-primary:hover { background: #6D28D9; } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 4px #A78BFA; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Secondary action on white surface.",
+      "html": "<button class=\"ds-btn-outline\">Book a Demo</button>",
+      "css": ".ds-btn-outline { font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; font-size: 14.5px; font-weight: 600; height: 40px; padding: 0 16px; background: #FFFFFF; color: #1C1917; border: 1px solid #D6D3D1; border-radius: 8px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-outline:hover { background: #F5F5F4; } .ds-btn-outline:focus-visible { outline: none; box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 4px #A78BFA; }"
+    },
+    {
+      "name": "Destructive Button",
+      "kind": "button",
+      "refersTo": "button-destructive",
+      "description": "Critical-red outline until hovered or focused; set apart from its neighbours.",
+      "html": "<button class=\"ds-btn-destructive\">Accept risk</button>",
+      "css": ".ds-btn-destructive { font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; font-size: 13px; font-weight: 600; height: 36px; padding: 0 12px; background: #FFFFFF; color: #DC2626; border: 1px solid #DC2626; border-radius: 8px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1), color 150ms; } .ds-btn-destructive:hover, .ds-btn-destructive:focus { background: #DC2626; color: #FFFFFF; } .ds-btn-destructive:focus-visible { outline: none; box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 4px #DC2626; }"
+    },
+    {
+      "name": "Search Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Rounded field on white with a violet focus ring and caret.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Search assets, findings, policies…\" />",
+      "css": ".ds-input { font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; font-size: 14px; height: 40px; padding: 0 12px; background: #FFFFFF; color: #1C1917; border: 1px solid #D6D3D1; border-radius: 8px; caret-color: #7C3AED; width: 280px; } .ds-input::placeholder { color: #78716C; } .ds-input:hover { border-color: #A8A29E; } .ds-input:focus-visible { outline: none; border-color: #7C3AED; box-shadow: 0 0 0 3px rgba(124,58,237,0.18); }"
+    },
+    {
+      "name": "Sidebar Navigation",
+      "kind": "nav",
+      "refersTo": "nav-item-active",
+      "description": "Clean light sidebar: plain uppercase group labels; the active item sits on brand-wash with a violet left indicator.",
+      "html": "<nav class=\"ds-nav\"><div class=\"ds-group\">Monitor</div><a class=\"ds-item ds-item--active\" href=\"#\">Dashboard</a><a class=\"ds-item\" href=\"#\">Posture</a><a class=\"ds-item\" href=\"#\">Alerts</a><div class=\"ds-group\">Discover</div><a class=\"ds-item\" href=\"#\">Inventory</a></nav>",
+      "css": ".ds-nav { font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; width: 256px; background: #FFFFFF; border-right: 1px solid #E7E5E4; padding: 12px 8px; } .ds-group { margin: 14px 8px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #A8A29E; } .ds-item { position: relative; display: flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 6px; font-size: 14px; font-weight: 500; color: #57534E; text-decoration: none; transition: background-color 150ms cubic-bezier(0.16,1,0.3,1); } .ds-item:hover { background: #F5F5F4; color: #1C1917; } .ds-item--active { background: #F5F3FF; color: #6D28D9; font-weight: 600; } .ds-item--active::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: #7C3AED; } .ds-item:focus-visible { outline: 2px solid #7C3AED; outline-offset: -2px; }"
+    },
+    {
+      "name": "Status Indicator",
+      "kind": "chip",
+      "refersTo": "badge",
+      "description": "The security-status vocabulary: a filled dot with its label. Color is never the only signal.",
+      "html": "<span class=\"ds-status ds-status--low\"><i></i>Low</span> <span class=\"ds-status ds-status--medium\"><i></i>Medium</span> <span class=\"ds-status ds-status--high\"><i></i>High</span> <span class=\"ds-status ds-status--critical\"><i></i>Critical</span>",
+      "css": ".ds-status { display: inline-flex; align-items: center; gap: 6px; font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; font-size: 13px; font-weight: 600; margin-right: 16px; color: #57534E; } .ds-status i { width: 8px; height: 8px; border-radius: 9999px; } .ds-status--low i { background: #16A34A; } .ds-status--medium i { background: #D97706; } .ds-status--high i { background: #EA580C; } .ds-status--critical i { background: #DC2626; }"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "badge",
+      "description": "A flat rounded-full pill for factual states and labels.",
+      "html": "<span class=\"ds-pill ds-pill--brand\">Enforced</span> <span class=\"ds-pill ds-pill--critical\">Demo data</span>",
+      "css": ".ds-pill { display: inline-block; padding: 2px 10px; margin-right: 8px; border-radius: 9999px; border: 1px solid currentColor; font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; } .ds-pill--brand { color: #6D28D9; background: color-mix(in srgb, #7C3AED 8%, #fff); } .ds-pill--critical { color: #DC2626; background: color-mix(in srgb, #DC2626 8%, #fff); }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "A white card over the warm ground; border and light shadow separate it.",
+      "html": "<section class=\"ds-card\"><header class=\"ds-card__head\"><h2 class=\"ds-card__title\">Recent alerts</h2><p class=\"ds-card__sub\">Cross-module alert stream, newest first</p></header><div class=\"ds-card__body\">Card content sits on white over the off-white page.</div></section>",
+      "css": ".ds-card { font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; background: #FFFFFF; border: 1px solid #E7E5E4; border-radius: 8px; box-shadow: 0 1px 2px rgba(28,25,23,0.04); color: #1C1917; width: 420px; } .ds-card__head { padding: 16px 20px; } .ds-card__title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.005em; } .ds-card__sub { margin: 2px 0 0; font-size: 13px; color: #78716C; } .ds-card__body { padding: 0 20px 20px; font-size: 14px; line-height: 1.5; }"
+    },
+    {
+      "name": "Data Table",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "Compact scannable table: subtle header, row separators, tabular figures right-aligned, no vertical column rulings.",
+      "html": "<table class=\"ds-table\"><thead><tr><th>Right</th><th>Section</th><th class=\"num\">Open</th><th class=\"num\">Overdue</th></tr></thead><tbody><tr><td>Access</td><td class=\"mono\">S.11</td><td class=\"num\">12</td><td class=\"num warn\">1</td></tr><tr><td>Erasure</td><td class=\"mono\">S.12</td><td class=\"num\">9</td><td class=\"num\">0</td></tr></tbody></table>",
+      "css": ".ds-table { font-family: Inter, Archivo, 'Segoe UI', Arial, sans-serif; font-size: 14px; color: #1C1917; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E7E5E4; border-radius: 8px; width: 420px; font-variant-numeric: tabular-nums; overflow: hidden; } .ds-table th { background: #F5F5F4; padding: 8px 12px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #78716C; text-align: left; } .ds-table td { padding: 10px 12px; border-top: 1px solid #F5F5F4; } .ds-table tbody tr:hover td { background: #FAFAF9; } .ds-table .num { text-align: right; } .ds-table .mono { font-family: 'Fragment Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; color: #57534E; } .ds-table .warn { color: #D97706; font-weight: 600; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Light Premium Enterprise Security",
+    "overview": "ReedShield is an AI Security Posture Management console for people under time pressure. It earns trust through clarity and restraint, in the register serious security products live in today: Wiz-level information clarity, Linear-level interface polish, Stripe-level cleanliness. A warm off-white ground carries crisp white cards separated by hairline borders and light shadow. Density is high and deliberate; emphasis comes from weight, size, and the security-status colors, never from glow, heavy gradient, or blur. Corners are gently rounded and a single controlled violet accent marks primary actions, selection, and active navigation. This is a clean replacement of the previous auditor's working-papers world, which is the anti-reference.",
+    "keyCharacteristics": [
+      "Warm off-white ground (#FAFAF9) with crisp white cards; borders and light shadow separate content.",
+      "Inter for all UI text (Archivo fallback), Fragment Mono for identifiers, timestamps, and hashes.",
+      "Fixed green/amber/orange/red security-status scale plus info cyan, always paired with a label.",
+      "A controlled violet brand accent for primary actions, selection, and active navigation.",
+      "Marketing and console share the brand, type, and color system but stay visually distinct in density."
+    ],
+    "rules": [
+      { "name": "The One Accent Rule", "body": "Violet is the only brand accent. Severity and health use the fixed status scale, and each status color means exactly one thing across the console.", "section": "colors" },
+      { "name": "The Labeled Status Rule", "body": "A status dot, pill, or bar ships with a label or an accessible name. No status is color-only.", "section": "colors" },
+      { "name": "The Tabular Figures Rule", "body": "tabular-nums is set for tables; every number aligns.", "section": "typography" },
+      { "name": "The Restrained Shadow Rule", "body": "Separation is border-first, shadow-second. No heavy or colored shadows; reserve larger shadows for floating overlays.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do put content on white cards over the warm off-white ground, separated by 1px borders and light shadow.",
+      "Do keep the status scale meanings fixed: green low, amber medium, orange high, red critical, cyan info.",
+      "Do pair every status color with a label or accessible name.",
+      "Do keep the violet accent to primary actions, selection, and active navigation.",
+      "Do keep numerals tabular and right-aligned, and tables compact."
+    ],
+    "donts": [
+      "Don't reintroduce the working-papers world: ledger-green grounds, column rulings, tick/stamp identity, square corners, or the old tab colors.",
+      "Don't reintroduce the generic default look (bright #2563eb blue, stark white, heavy floating cards) or a dark neon SOC theme.",
+      "Don't stack heavy or colored shadows, or lean on gradients and glass.",
+      "Don't use color alone for status, or a status color for decoration.",
+      "Don't use monospace for prose or buttons."
+    ]
+  }
+}

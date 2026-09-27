@@ -1,0 +1,524 @@
+"""
+main.py
+────────
+FastAPI application entry point for agent-orchestrator-service.
+
+Responsibilities
+────────────────
+1. Build the FastAPI app with lifespan management.
+2. Initialise all singletons (DB, Kafka, RiskEngine, PolicyClient)
+   and store them on app.state for dependency injection.
+3. Register routers.
+4. Add middleware:
+   - Trace ID injection (every request gets a UUID correlation ID)
+   - Structured request logging
+   - Global exception handler
+5. Expose health + readiness endpoints.
+
+Run locally
+───────────
+    uvicorn main:app --reload --port 8094
+
+Or via Docker:
+    docker build -t agent-orchestrator .
+    docker run -p 8094:8094 agent-orchestrator
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
+# ── Hydrate managed config from spm-db before clients.llm_client / ChatAnthropic
+# read ANTHROPIC_API_KEY / ANTHROPIC_MODEL from os.environ at import time. ──
+from platform_shared.integration_config import hydrate_env_from_db  # noqa: E402
+hydrate_env_from_db()
+# Hydration above remains a fallback — LLM_MODEL is also read live via
+# get_credential_by_env at lifespan time so a model bump in the UI is
+# picked up on the next container start *without* needing the hydrator
+# to win against stale env vars.  (LLM_API_KEY is operator-set so we
+# leave it on plain os.getenv.)
+from platform_shared.credentials import get_credential_by_env  # noqa: E402
+
+from fastapi import FastAPI, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+
+from clients.policy_client import PolicyClient
+from consumers.lineage_consumer import LineageEventConsumer
+from consumers.audit_alert_consumer import AuditAlertConsumer
+from db.base import make_engine, make_session_factory, Base
+from events.publisher import EventPublisher
+from events.store import EventStore
+from results.service import ResultsService
+from cases.router import router as cases_router
+from cases.service import CasesService
+from threat_findings.router import router as threat_findings_router
+from threat_findings.service import ThreatFindingsService
+from api.findings_router import router as findings_api_router
+from api.alerts_router import router as alerts_api_router
+from routers import sessions as sessions_router
+from routers.lineage import router as lineage_router
+from policies.router import router as policies_router
+from services.risk_engine import RiskEngine
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)-8s %(name)-35s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("agent_orchestrator")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings (read from environment — override with .env + python-dotenv)
+# ─────────────────────────────────────────────────────────────────────────────
+
+KAFKA_BOOTSTRAP    = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+# Default DB location for out-of-container dev runs — kept under
+# DataVolumes/agent-orchestrator/ alongside the other persistent
+# dev-only state (matches the compose mount target). Without this
+# explicit default, running `python main.py` from the repo root
+# would drop a stray `agent_orchestrator.db` at the repo root that
+# leaks across branches and can't be cleaned by `make clean`.
+# Both compose and k8s set DB_PATH=/data/agent_orchestrator.db
+# explicitly so this default is purely a dev-outside-docker cushion.
+_DEFAULT_DB_PATH = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..", "..", "DataVolumes", "agent-orchestrator",
+        "agent_orchestrator.db",
+    )
+)
+DB_PATH            = os.getenv("DB_PATH", _DEFAULT_DB_PATH)
+SERVICE_NAME       = "agent-orchestrator-service"
+SERVICE_VERSION    = "1.0.0"
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    logger.debug("Loaded .env file")
+except ImportError:
+    pass   # python-dotenv is optional
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lifespan: startup / shutdown
+# ─────────────────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """
+    Initialise shared resources on startup, tear them down on shutdown.
+    All objects stored on app.state are available in dependencies via
+    `request.app.state.<name>`.
+    """
+    logger.info("=== %s v%s starting up ===", SERVICE_NAME, SERVICE_VERSION)
+
+    # -- Database ------------------------------------------------------------
+    # Re-read DB_PATH from the live environment so tests that set
+    # os.environ["DB_PATH"] = ":memory:" after module import still work.
+    db_url = f"sqlite+aiosqlite:///{os.getenv('DB_PATH', DB_PATH)}"
+    engine: AsyncEngine = make_engine(db_url)
+
+    # Enable WAL mode for file-based SQLite — allows concurrent readers during
+    # writes and dramatically reduces "database is locked" errors.
+    # Skipped for :memory: databases (WAL is unsupported there).
+    # busy_timeout is set in a separate statement so it still takes effect
+    # even when WAL mode is unavailable (e.g. on overlay filesystems).
+    if db_url.startswith("sqlite") and ":memory:" not in db_url:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("PRAGMA journal_mode=WAL"))
+            logger.info("SQLite WAL mode enabled")
+        except Exception as _wal_err:
+            logger.warning("Could not enable WAL mode: %s — falling back to default journal", _wal_err)
+            # Dispose the pool so any connection tainted by the failed PRAGMA
+            # is discarded; subsequent engine.begin() calls get fresh connections.
+            await engine.dispose()
+
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("PRAGMA busy_timeout=30000"))
+            logger.debug("SQLite busy_timeout=30000 set")
+        except Exception as _bt_err:
+            logger.warning("Could not set busy_timeout: %s", _bt_err)
+
+    # Dev path: create tables automatically via create_all.
+    # Production path: set DB_AUTO_CREATE_TABLES=false and run
+    # `alembic upgrade head` before deploying.
+    if os.getenv("DB_AUTO_CREATE_TABLES", "true").lower() == "true":
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda c: Base.metadata.create_all(c, checkfirst=True))
+        logger.info("create_all complete (dev mode)")
+
+        # ── Incremental column migration for threat_findings ────────────────
+        # create_all(checkfirst=True) creates missing *tables* but never adds
+        # columns to existing tables. If this DB was created before the
+        # AI-enrichment fields were introduced, ALTER TABLE adds them now.
+        _NEW_THREAT_FINDING_COLS = [
+            ("timestamp",           "TEXT"),
+            ("confidence",          "REAL"),
+            ("risk_score",          "REAL"),
+            ("hypothesis",          "TEXT"),
+            ("asset",               "TEXT"),
+            ("environment",         "TEXT"),
+            ("correlated_events",   "TEXT"),
+            ("correlated_findings", "TEXT"),
+            ("triggered_policies",  "TEXT"),
+            ("policy_signals",      "TEXT"),
+            ("recommended_actions", "TEXT"),
+            ("should_open_case",    "BOOLEAN"),
+            ("case_id",             "TEXT"),
+            ("source",              "TEXT"),
+            ("updated_at",          "TEXT"),
+            ("is_proactive",        "BOOLEAN"),
+            ("dedup_key",        "TEXT"),
+            ("occurrence_count", "INTEGER"),
+            ("first_seen",       "TEXT"),
+            ("last_seen",        "TEXT"),
+            ("group_id",         "TEXT"),
+            ("group_size",       "INTEGER"),
+            ("priority_score",   "REAL"),
+            ("suppressed",       "BOOLEAN"),
+        ]
+        try:
+            async with engine.begin() as conn:
+                result = await conn.execute(text("PRAGMA table_info(threat_findings)"))
+                existing_cols = {row[1] for row in result.fetchall()}
+                for col_name, col_type in _NEW_THREAT_FINDING_COLS:
+                    if col_name not in existing_cols:
+                        logger.info(
+                            "DB migration: adding missing column '%s %s' to threat_findings",
+                            col_name, col_type,
+                        )
+                        await conn.execute(
+                            text(f"ALTER TABLE threat_findings ADD COLUMN {col_name} {col_type}")
+                        )
+        except Exception as _mig_err:
+            # Non-fatal: log and continue. The missing columns will cause
+            # runtime errors only if the application actually tries to use them,
+            # but a startup crash is worse than a deferred schema warning.
+            logger.warning(
+                "Incremental column migration failed (non-fatal): %s", _mig_err
+            )
+
+    session_factory: async_sessionmaker = make_session_factory(engine)
+    app.state.db_engine = engine
+    app.state.db_session_factory = session_factory
+    logger.info("Database engine initialised: %s", db_url)
+
+    # Seed demo data on first boot (no-op if DB already has sessions)
+    try:
+        from seed_demo import seed_demo_data
+        await seed_demo_data(session_factory)
+    except Exception as _seed_err:
+        logger.warning("seed_demo: skipped — %s", _seed_err)
+
+    # -- Policy store (sync SQLAlchemy) -------------------------------------
+    policy_db_url = os.getenv(
+        "POLICY_DB_URL",
+        f"sqlite:///{DB_PATH}"
+    )
+    try:
+        from policies import store as policy_store
+        from policies.seed import seed_policies
+        policy_store.init_db(policy_db_url, create_tables=True)
+        seed_policies()
+        logger.info("Policy store initialised: %s", policy_db_url)
+    except Exception as _policy_err:
+        logger.error("Policy store init FAILED: %s", _policy_err)
+        raise
+
+    # -- In-memory event store -----------------------------------------------
+    store = EventStore(max_events_per_session=500)
+    app.state.event_store = store
+
+    # -- Kafka publisher (degrades gracefully if broker unavailable) ---------
+    publisher = EventPublisher(bootstrap_servers=KAFKA_BOOTSTRAP, store=store)
+    await publisher.start()
+    app.state.event_publisher = publisher
+
+    # -- Lineage Kafka consumer (replaces the legacy HTTP dual-write) --------
+    # Drains GlobalTopics.LINEAGE_EVENTS and persists each event into
+    # session_events using services/lineage_ingest.py — the SAME persistence
+    # path the POST /api/v1/lineage/events handler uses, so the row inserted
+    # is byte-identical regardless of whether the event arrived via HTTP
+    # (legacy) or Kafka (current). End-result parity asserted by
+    # tests/test_lineage_kafka_parity.py.
+    try:
+        from platform_shared.topics import GlobalTopics
+        lineage_consumer = LineageEventConsumer(
+            bootstrap_servers = KAFKA_BOOTSTRAP,
+            topic             = GlobalTopics.LINEAGE_EVENTS,
+            group_id          = "agent-orchestrator-lineage",
+            session_factory   = session_factory,
+        )
+        await lineage_consumer.start()
+        app.state.lineage_consumer = lineage_consumer
+        logger.info("Lineage Kafka consumer started topic=%s",
+                    GlobalTopics.LINEAGE_EVENTS)
+    except Exception as _consumer_err:
+        # Don't crash startup if Kafka is unavailable; the HTTP endpoint at
+        # POST /api/v1/lineage/events still works as a manual fallback.
+        app.state.lineage_consumer = None
+        logger.warning(
+            "Lineage Kafka consumer failed to start (will not persist via Kafka): %s",
+            _consumer_err,
+        )
+
+    try:
+        _tenants = os.environ.get("AUDIT_ALERT_TENANTS", "t1").split(",")
+        audit_alert_consumer = AuditAlertConsumer(
+            bootstrap_servers = KAFKA_BOOTSTRAP,
+            tenants           = [t.strip() for t in _tenants if t.strip()],
+            session_factory   = session_factory,
+        )
+        await audit_alert_consumer.start()
+        app.state.audit_alert_consumer = audit_alert_consumer
+    except Exception as _aac_err:
+        app.state.audit_alert_consumer = None
+        logger.warning("Audit alert consumer failed to start: %s", _aac_err)
+
+    # -- Stateless services (constructed once, reused across requests) -------
+    app.state.risk_engine   = RiskEngine()
+    app.state.policy_client = PolicyClient()
+    app.state.results_service = ResultsService()
+    logger.info("ResultsService initialised")
+    app.state.cases_service = CasesService()
+    app.state.threat_findings_service = ThreatFindingsService()
+    logger.info("CasesService initialised (DB-backed)")
+
+    # ── LLM Client ────────────────────────────────────────────────────────
+    # Set LLM_PROVIDER=docker  to use Docker Model Runner (no API key needed).
+    # Set LLM_PROVIDER=anthropic (default) to use the Anthropic Claude API.
+    llm_provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+
+    if llm_provider == "docker":
+        from clients.llm_client import DockerModelClient
+        docker_model    = get_credential_by_env("LLM_MODEL", default=os.getenv("LLM_MODEL", "ai/smollm2"))
+        docker_base_url = os.getenv(
+            "DOCKER_MODEL_RUNNER_URL",
+            DockerModelClient.DEFAULT_BASE_URL,
+        )
+        app.state.llm_client = DockerModelClient(
+            model=docker_model,
+            base_url=docker_base_url,
+        )
+        logger.info(
+            "DockerModelClient initialised: model=%s base_url=%s",
+            docker_model, docker_base_url,
+        )
+    else:
+        llm_api_key = os.getenv("LLM_API_KEY", "")
+        llm_model   = get_credential_by_env("LLM_MODEL", default=os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001"))
+        if llm_api_key:
+            from clients.llm_client import LLMClient
+            app.state.llm_client = LLMClient(api_key=llm_api_key, model=llm_model)
+            logger.info("LLMClient initialised: model=%s", llm_model)
+        else:
+            app.state.llm_client = None
+            logger.info("LLM_API_KEY not set — LLM execution step disabled")
+
+    # ── Guard + Output scanner → PromptProcessor ───────────────────────────
+    guard_url   = os.getenv("GUARD_MODEL_URL", "")
+    llm_scan_en = os.getenv("GUARD_LLM_SCAN_ENABLED", "false").lower() == "true"
+
+    from clients.guard_client import GuardClient
+    from clients.output_scanner import OutputScanner
+    from services.prompt_processor import PromptProcessor
+
+    guard_client   = GuardClient(base_url=guard_url or None)
+    output_scanner = OutputScanner(
+        guard_base_url=guard_url or None,
+        llm_scan_enabled=llm_scan_en,
+    )
+    app.state.prompt_processor = PromptProcessor(
+        guard_client=guard_client,
+        output_scanner=output_scanner,
+    )
+    logger.info(
+        "PromptProcessor initialised: guard_url=%s llm_scan=%s",
+        guard_url or "regex-fallback",
+        llm_scan_en,
+    )
+
+    logger.info("=== %s ready ===", SERVICE_NAME)
+    yield
+
+    # -- Teardown ------------------------------------------------------------
+    logger.info("=== %s shutting down ===", SERVICE_NAME)
+    lc = getattr(app.state, "lineage_consumer", None)
+    if lc is not None:
+        try:
+            await lc.stop()
+        except Exception as _lc_err:
+            logger.warning("Lineage consumer stop error: %s", _lc_err)
+    aac = getattr(app.state, "audit_alert_consumer", None)
+    if aac is not None:
+        try:
+            await aac.stop()
+        except Exception as _aac_err:
+            logger.warning("Audit alert consumer stop error: %s", _aac_err)
+    await publisher.stop()
+    await engine.dispose()
+    logger.info("=== %s stopped ===", SERVICE_NAME)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application factory
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="Agent Orchestrator Service",
+        description=(
+            "Central execution engine for AI agent sessions. "
+            "Handles JWT auth, risk scoring, policy evaluation, "
+            "session persistence, and Kafka event publishing."
+        ),
+        version=SERVICE_VERSION,
+        lifespan=lifespan,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+    )
+
+    # ── CORS ────────────────────────────────────────────────────────────────
+    _cors_origins = [
+        o.strip()
+        for o in os.getenv("CORS_ORIGINS", "http://aispm.local,http://localhost:5173").split(",")
+        if o.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+        allow_credentials=False,
+    )
+
+    # ── Trace ID + RBAC access-log middleware ──────────────────────────────
+    @app.middleware("http")
+    async def trace_and_access_log_middleware(request: Request, call_next) -> Response:
+        """
+        Single middleware that:
+          1. Assigns a correlation / trace ID to every request.
+          2. After the response, emits a structured access-log line
+             that includes the caller's user_id, roles, and groups
+             (extracted from request.state.identity if auth ran successfully).
+        """
+        trace_id = (
+            request.headers.get("X-Trace-ID")
+            or request.headers.get("X-Request-ID")
+            or str(uuid.uuid4())
+        )
+        request.state.trace_id = trace_id
+        # Pre-set identity to None; get_current_identity will populate it
+        request.state.identity = None
+
+        start = time.perf_counter()
+        response: Response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        response.headers["X-Trace-ID"] = trace_id
+
+        # Extract identity if auth ran (populated by get_current_identity)
+        identity = getattr(request.state, "identity", None)
+        user_id  = identity.user_id  if identity else "anonymous"
+        roles    = identity.roles     if identity else []
+        groups   = identity.groups    if identity else []
+
+        logger.info(
+            "ACCESS %s %s %d %.1fms | user=%s roles=%s groups=%s | trace=%s",
+            request.method, request.url.path,
+            response.status_code, elapsed_ms,
+            user_id, roles, groups, trace_id,
+        )
+        return response
+
+    # ── Global validation error handler ────────────────────────────────────
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        trace_id = getattr(request.state, "trace_id", "unknown")
+        logger.warning("Validation error trace=%s errors=%s", trace_id, exc.errors())
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "Request body failed validation",
+                    "trace_id": trace_id,
+                    "details": exc.errors(),
+                }
+            },
+        )
+
+    # ── Catch-all handler ───────────────────────────────────────────────────
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        trace_id = getattr(request.state, "trace_id", "unknown")
+        logger.exception("Unhandled exception trace=%s: %s", trace_id, exc)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "An unexpected error occurred",
+                    "trace_id": trace_id,
+                }
+            },
+        )
+
+    # ── Routers ─────────────────────────────────────────────────────────────
+    app.include_router(sessions_router.router)
+    app.include_router(lineage_router)
+    from results.router import router as results_router
+    app.include_router(results_router)
+    app.include_router(cases_router)
+    app.include_router(threat_findings_router)
+    app.include_router(findings_api_router)
+    app.include_router(alerts_api_router)
+    app.include_router(policies_router)
+
+    # ── Health endpoints ────────────────────────────────────────────────────
+    @app.get("/health", tags=["Observability"], summary="Liveness probe")
+    async def health() -> dict:
+        return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
+
+    @app.get("/ready", tags=["Observability"], summary="Readiness probe")
+    async def ready(request: Request) -> dict:
+        db_ok = hasattr(request.app.state, "db_engine") and hasattr(request.app.state, "db_session_factory")
+        store: EventStore = getattr(request.app.state, "event_store", None)
+        return {
+            "status": "ready" if db_ok else "not_ready",
+            "db": "connected" if db_ok else "disconnected",
+            "kafka": "connected" if request.app.state.event_publisher._available else "log_only",
+            "event_store": {
+                "sessions_tracked": store.session_count() if store else 0,
+                "total_events": store.total_event_count() if store else 0,
+            },
+        }
+
+    return app
+
+
+app = create_app()

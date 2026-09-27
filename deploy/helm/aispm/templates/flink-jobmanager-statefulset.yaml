@@ -1,0 +1,228 @@
+# deploy/helm/aispm/templates/flink-jobmanager-statefulset.yaml
+#
+# Two replicas for Kubernetes-native HA:
+#   - Both pods start; leader election happens via Kubernetes ConfigMaps/Leases
+#     (scoped by kubernetes.cluster-id in flink-conf.yaml).
+#   - The active leader dispatches jobs to TaskManagers. The standby monitors
+#     the ConfigMap lease and takes over immediately if the leader pod dies.
+#   - TaskManagers use the HA ConfigMap to discover the current leader address;
+#     they do NOT use the static jobmanager.rpc.address from the config file.
+#
+# Per-pod RPC address (init container):
+#   The flink-conf ConfigMap is shared across both pods and contains a static
+#   jobmanager.rpc.address (flink-jobmanager service DNS). Each JM pod must
+#   advertise its OWN address for RPC so TaskManagers can connect back to the
+#   right pod. The prep-flink-conf init container:
+#     1. Copies the ConfigMap to a writable emptyDir (/flink-conf-rw).
+#     2. Replaces jobmanager.rpc.address with the pod's FQDN via `hostname -f`
+#        (e.g. flink-jobmanager-0.flink-jobmanager.aispm.svc.cluster.local).
+#   The main container mounts the emptyDir copy, not the raw ConfigMap.
+#
+# Shared PVCs:
+#   flink-ha (HA metadata / blob store) and flink-checkpoints are ReadWriteMany
+#   so both JM pods can read/write them concurrently. See flink-pvc.yaml.
+#
+# CEP job submission after scale-to-2:
+#   flink-pyjob-submitter-job.yaml posts to the flink-jobmanager Service which
+#   load-balances to both pods. Both pods expose the REST endpoint; the standby
+#   forwards job submissions to the active leader transparently. No changes to
+#   the submitter are needed.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: flink-jobmanager
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  serviceName: flink-jobmanager
+  replicas: {{ .Values.flink.jobmanager.replicas | default 2 }}
+  selector:
+    matchLabels: { app: flink-jobmanager }
+  template:
+    metadata:
+      labels: { app: flink-jobmanager }
+      annotations:
+        # ── Stay out of the Istio mesh ────────────────────────────────────
+        # When kubelet probes a sidecar-injected pod, Istio rewrites the
+        # probe to go through pilot-agent's :15020 status port and proxies
+        # to the actual app port (here :8081 — Flink REST/Web UI).  During
+        # JM startup the Pekko cluster + Flink dispatcher take 10-30s to
+        # bind :8081, but Istio's probe-rewrite kicks in immediately;
+        # every probe gets "connection refused" until the app is up.  If
+        # ANY probe in that window fails liveness threshold, kubelet
+        # restarts the pod — and the pod can never out-pace the race.
+        # Observed 2026-05-02: 9 restarts in 5 hours per JM.  Disabling
+        # sidecar injection sidesteps the rewrite entirely; Flink JMs do
+        # their own internal RPC over Pekko TCP and don't gain anything
+        # from mesh mTLS.  Apps that talk TO the JMs (UI, agent-
+        # orchestrator) stay in the mesh — only the JM pods themselves
+        # are exempt.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: flink
+      # ── Spread JM replicas across nodes (multi-node clusters) ─────────────
+      # Active leader and hot standby on different nodes so a single-node
+      # outage takes at most one JM. `preferred` keeps single-node dev
+      # clusters working when only one node is available.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: flink-jobmanager }
+                topologyKey: kubernetes.io/hostname
+      # ── Init container: inject per-pod jobmanager.rpc.address ─────────────
+      # The flink-conf ConfigMap is read-only; Flink's docker-entrypoint.sh
+      # cannot append to it. We copy it to an emptyDir and replace the static
+      # service hostname with the pod's own FQDN so each JM advertises the
+      # correct RPC endpoint for TaskManager connections.
+      initContainers:
+        - name: prep-flink-conf
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              POD_FQDN=$(hostname -f)
+              echo "Injecting jobmanager.rpc.address: ${POD_FQDN}"
+              sed "s|^jobmanager\.rpc\.address:.*|jobmanager.rpc.address: ${POD_FQDN}|" \
+                /flink-conf-base/flink-conf.yaml > /flink-conf-rw/flink-conf.yaml
+          volumeMounts:
+            - name: flink-conf
+              mountPath: /flink-conf-base
+            - name: flink-conf-rw
+              mountPath: /flink-conf-rw
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      containers:
+        - name: flink-jobmanager
+          image: {{ include "aispm.image" .Values.images.flinkJob }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["jobmanager"]
+          ports:
+            - containerPort: 8081  # REST / UI
+            - containerPort: 6123  # RPC
+            - containerPort: 6124  # BLOB server (pinned port, see flink-conf.yaml)
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            # K8s HA needs the pod to know its own namespace at runtime —
+            # Flink reads this to scope leader-election ConfigMaps/Leases.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: {{ .Values.flink.jobmanager.resources.requests.cpu | quote }}
+              memory: {{ .Values.flink.jobmanager.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.flink.jobmanager.resources.limits.cpu | quote }}
+              memory: {{ .Values.flink.jobmanager.resources.limits.memory | quote }}
+          # ── Readiness probe ─────────────────────────────────────────────
+          # /overview returns HTTP 200 only when the dispatcher actor is
+          # alive AND a leader has been elected. Probing every 10s with a
+          # 3-failure threshold means a misbehaving JM is removed from the
+          # flink-jobmanager Service endpoints within ~30s — TaskManagers
+          # then route to the standby JM transparently.
+          readinessProbe:
+            httpGet:
+              path: /overview
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          # ── Liveness probe ──────────────────────────────────────────────
+          # Without this, a Flink 1.18 JM that suffers a Pekko dispatcher
+          # actor death (the actor system crashes internally but the JVM
+          # keeps running its embedded HTTP server returning HTTP 500
+          # ``RecipientUnreachableException``) sits in NotReady forever
+          # because readinessProbe failing only removes it from Service
+          # endpoints — it does NOT kill the pod.  Operators see the
+          # cluster stuck for hours, TaskManagers in CrashLoopBackOff
+          # because they can't reach a healthy JM, and have to manually
+          # ``kubectl delete pod ... --grace-period=0`` to break the
+          # deadlock.
+          #
+          # Liveness on the same /overview endpoint catches the deadlock
+          # automatically: 3 consecutive HTTP 500s in 90s → kubelet kills
+          # the pod, StatefulSet recreates it, leader fails over to the
+          # standby JM, cluster self-heals.
+          #
+          # Conservative numbers chosen so a real start-up (cold JVM +
+          # leader election + checkpoint restore from MinIO) doesn't get
+          # killed mid-init: initialDelaySeconds=60 covers the slowest
+          # observed restart we've seen on kind multinode (~45s); 90s
+          # before-kill window from periodSeconds*failureThreshold gives
+          # plenty of room for a single transient probe failure during
+          # leader handoff.
+          livenessProbe:
+            httpGet:
+              path: /overview
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          {{- /*
+          Conditionally mount checkpoint / HA PVCs based on whether the
+          chart is configured to use filesystem or S3 storage. With
+          s3:// URIs the PVCs aren't rendered (see flink-pvc.yaml) so we
+          must NOT try to mount them here — that would block scheduling
+          forever waiting for the missing PVC.
+          */}}
+          {{- $useFileCheckpoints := not (hasPrefix "s3:" (.Values.flink.checkpointsDir | default "file:///flink/checkpoints")) }}
+          {{- $useFileHa          := not (hasPrefix "s3:" (.Values.flink.haStorageDir  | default "file:///flink/ha")) }}
+          volumeMounts:
+            # Mount the writable copy produced by prep-flink-conf (contains
+            # the per-pod jobmanager.rpc.address), NOT the raw ConfigMap.
+            - name: flink-conf-rw
+              mountPath: /opt/flink/conf/flink-conf.yaml
+              subPath: flink-conf.yaml
+            {{- if $useFileCheckpoints }}
+            - name: checkpoints
+              mountPath: /flink/checkpoints
+            {{- end }}
+            - name: savepoints
+              mountPath: /flink/savepoints
+            {{- if $useFileHa }}
+            - name: ha
+              mountPath: /flink/ha
+            {{- end }}
+      volumes:
+        # Base ConfigMap — read-only source for the init container.
+        - name: flink-conf
+          configMap:
+            name: flink-conf
+        # Writable copy with per-pod jobmanager.rpc.address injected.
+        - name: flink-conf-rw
+          emptyDir: {}
+        {{- if $useFileCheckpoints }}
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: flink-checkpoints
+        {{- end }}
+        - name: savepoints
+          persistentVolumeClaim:
+            claimName: flink-savepoints
+        {{- if $useFileHa }}
+        - name: ha
+          persistentVolumeClaim:
+            claimName: flink-ha
+        {{- end }}

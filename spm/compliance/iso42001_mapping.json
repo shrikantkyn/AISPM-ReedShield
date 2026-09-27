@@ -1,0 +1,42 @@
+[
+  {
+    "framework": "ISO_42001",
+    "function": "AI_MANAGEMENT_SYSTEM",
+    "category": "ISO42001-6.1",
+    "subcategory": "Clause 6.1 — actions to address AI risks and opportunities are policy-enforced, not manual",
+    "cpm_control": "OPA:prompt_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "ISO_42001",
+    "function": "AI_MANAGEMENT_SYSTEM",
+    "category": "ISO42001-8.1",
+    "subcategory": "Clause 8.1 — operational planning and control: every model has a lifecycle state and owner",
+    "cpm_control": "model_registry:lifecycle_state_machine",
+    "evaluation_rule": "enforcement_action_exists"
+  },
+  {
+    "framework": "ISO_42001",
+    "function": "PERFORMANCE_EVALUATION",
+    "category": "ISO42001-9.1",
+    "subcategory": "Clause 9.1 — monitoring, measurement, analysis: continuous posture snapshots",
+    "cpm_control": "spm_aggregator:posture_snapshots",
+    "evaluation_rule": "snapshots_recent"
+  },
+  {
+    "framework": "ISO_42001",
+    "function": "SUPPLIER_RELATIONSHIPS",
+    "category": "ISO42001-A.10",
+    "subcategory": "Annex A.10 — third-party/supplier AI system resources are asset-tracked and integrity-checked",
+    "cpm_control": "model-security:modelscan_scanner",
+    "evaluation_rule": "model_security_scanner_reachable"
+  },
+  {
+    "framework": "ISO_42001",
+    "function": "IMPROVEMENT",
+    "category": "ISO42001-10.1",
+    "subcategory": "Clause 10.1 — nonconformity and corrective action: enforcement actions are recorded",
+    "cpm_control": "audit_export:full_event_log",
+    "evaluation_rule": "enforcement_action_exists"
+  }
+]

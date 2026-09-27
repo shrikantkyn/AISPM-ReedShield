@@ -1,0 +1,231 @@
+# deploy/helm/aispm/values.dev.yaml
+# Dev overrides on top of values.yaml.  Always layered with
+# values.dev-multinode.yaml when running against the 3-node kind cluster
+# (the only supported dev topology since May 2026 — see runbook
+# §"Architecture").
+#
+# Usage: helm upgrade --install aispm deploy/helm/aispm/ -n aispm \
+#          -f deploy/helm/aispm/values.yaml \
+#          -f deploy/helm/aispm/values.dev.yaml
+#
+# Prerequisites (one-time):
+#   echo "127.0.0.1  aispm.local" | sudo tee -a /etc/hosts
+#
+# Then browse to: https://aispm.local  (chat UI — browser warns on first
+#                                       visit because the cert is selfsigned;
+#                                       click through and it sticks)
+#                 https://aispm.local/admin  (admin panel)
+#                 https://aispm.local/api/spm/docs  (SPM API Swagger)
+#                 https://aispm.local/api/docs      (platform API Swagger)
+
+# ── Always pull from local registry in dev ──────────────────────────────────
+# With IfNotPresent (the global default), kind nodes cache the old image and
+# never pull a freshly-pushed :latest tag on rollout restart.  Always is
+# required so every pod restart gets the image just pushed to localhost:5001.
+global:
+  imagePullPolicy: Always
+
+# ── Local registry image overrides ──────────────────────────────────────────
+# Kind pulls custom images from the local registry (localhost:5001).
+# Build + push all images first:
+#   IMAGE_REGISTRY=localhost:5001 bash deploy/scripts/build-images.sh
+images:
+  api:               { repository: localhost:5001/aispm-api,                tag: latest }
+  guardModel:        { repository: localhost:5001/aispm-guard-model,        tag: latest }
+  garakRunner:       { repository: localhost:5001/aispm-garak-runner,       tag: latest }
+  retrievalGw:       { repository: localhost:5001/aispm-retrieval-gw,       tag: latest }
+  processor:         { repository: localhost:5001/aispm-processor,          tag: latest }
+  policyDecider:     { repository: localhost:5001/aispm-policy-decider,     tag: latest }
+  agent:             { repository: localhost:5001/aispm-agent,              tag: latest }
+  memoryService:     { repository: localhost:5001/aispm-memory,             tag: latest }
+  executor:          { repository: localhost:5001/aispm-executor,           tag: latest }
+  toolParser:        { repository: localhost:5001/aispm-tool-parser,        tag: latest }
+  outputGuard:       { repository: localhost:5001/aispm-output-guard,       tag: latest }
+  freezeCtrl:        { repository: localhost:5001/aispm-freeze-ctrl,        tag: latest }
+  policySimulator:   { repository: localhost:5001/aispm-policy-sim,         tag: latest }
+  spmApi:            { repository: localhost:5001/aispm-spm-api,            tag: latest }
+  spmMcp:            { repository: localhost:5001/aispm-spm-mcp,            tag: latest }
+  spmLlmProxy:       { repository: localhost:5001/aispm-spm-llm-proxy,      tag: latest }
+  spmAggregator:     { repository: localhost:5001/aispm-spm-aggregator,     tag: latest }
+  agentOrchestrator: { repository: localhost:5001/aispm-agent-orchestrator, tag: latest }
+  threatHunter:      { repository: localhost:5001/aispm-threat-hunter,      tag: latest }
+  ui:                { repository: localhost:5001/aispm-ui,                 tag: latest }
+  startupOrch:       { repository: localhost:5001/aispm-startup-orch,       tag: latest }
+  flinkJob:          { repository: localhost:5001/aispm-flink-pyjob,        tag: latest }
+  agentRuntime:      { repository: localhost:5001/aispm-agent-runtime,      tag: latest }
+
+ingress:
+  # lvh.me is a wildcard DNS service that resolves any subdomain to 127.0.0.1.
+  # Used here because Google's OAuth client requires a public TLD for redirect
+  # URIs (rejects .local) and we don't have a real domain. .me is on the
+  # public suffix list, so Google accepts https://aispm.lvh.me/...
+  # No /etc/hosts entry needed; resolution works over public DNS.
+  host: aispm.lvh.me
+  # ingress-nginx is the only supported dev IngressClass — installed by
+  # bootstrap-cluster.sh against the kind cluster.
+  className: nginx
+  # Dev runs full HTTPS via cert-manager's selfsigned ClusterIssuer (one
+  # of the three rendered by templates/cert-manager-issuers.yaml). The
+  # selfsigned issuer needs no email and no ACME — the cert is generated
+  # locally on Certificate apply, fills the aispm-tls Secret immediately,
+  # and ingress-nginx (or Istio) terminates 443. Browsers warn because
+  # the cert isn't signed by a trusted CA — that's expected and only
+  # affects the first visit.
+  #
+  # If you really want HTTP-only on dev (a tool that can't bypass cert
+  # warnings, automation that hates self-signed, etc.), set tls=false
+  # and certManager=false here.
+  tls: true
+  # certManager disabled on dev because cert-manager's selfsigned issuer
+  # generates a cert browsers flag for WebSocket connections — there's
+  # no "click through" dialog for WSS, so the Simulator/Chat pages
+  # can never establish their result-streaming socket. Instead we
+  # manage `aispm-tls` (in istio-system + aispm) via mkcert, which
+  # signs with a root CA trusted at the OS level — no warnings.
+  #
+  # The bootstrap script (Step 2) AUTOMATES this:
+  #   - calls `mkcert -install` (idempotent; one-time sudo prompt)
+  #   - mints a cert covering `ingress.host` + localhost + IPs
+  #   - creates/updates the aispm-tls secret in both namespaces
+  #   - deletes any stale cert-manager Certificate resources that
+  #     would overwrite the secret
+  #
+  # Prereq: `brew install mkcert` (preflight warns if missing).
+  # Bypass: set SKIP_MKCERT=1 to opt out of the automation; you'll
+  # need to populate aispm-tls yourself before WSS will work.
+  # If you want to flip back to cert-manager (e.g. testing the prod
+  # path), set certManager=true and re-apply the chart.
+  certManager: false
+  httpsRedirect: true
+  clusterIssuer: selfsigned-cluster-issuer
+
+# Prometheus + Grafana removed May 2026 — templates deleted from the
+# chart, no overrides needed in dev.  Use `kubectl top` / Lens for
+# metrics, or install kube-prometheus-stack out-of-band if you want
+# scrape + dashboards back.
+
+# Kafka: single-broker dev mode was REMOVED in May 2026.  AISPM is HA-only
+# now — every dev cluster runs the 3-node kind topology (kind-cluster.sh
+# init).  The single-node anti-affinity workaround that used to be here
+# is incompatible with the no-SPOF contract.
+
+agentRuntime:
+  # gVisor (runsc).  Installed into every kind node by
+  # deploy/scripts/install-gvisor.sh during cluster bring-up; the
+  # `gvisor` RuntimeClass is then applied to user-uploaded agents only
+  # (system agents stay on the host runtime — see runbook §"Custom
+  # agents now run under gVisor").  Override to "" to disable.
+  runtimeClassName: ""
+
+  # Per-container max — must allow the istio-proxy sidecar's 2 vCPU
+  # default. Agent container itself uses 500m / 512Mi.
+  limits:
+    maxCpu: "2"
+    maxMemory: "1Gi"
+
+  # PERMISSIVE — required when aispm-agents is in ambient mode and
+  # gVisor blocks iptables-based sidecar interception. Ambient peers
+  # don't carry mTLS principals to the destination sidecar's L7
+  # filter, so STRICT would block them. NetworkPolicy + Restricted
+  # PSS + gVisor sentry + non-root + caps drop still defend.
+  mtlsMode: PERMISSIVE
+
+# Tetragon REMOVED in dev (May 2026) — TracingPolicies require the
+# `cilium.io/v1alpha1` CRD which only exists when Tetragon is installed.
+# Bootstrap no longer installs Tetragon (Linuxkit kernel can't host its
+# eBPF probes), so we gate the template off here. Without this gate the
+# infra-tier apply fails with `no matches for kind "TracingPolicy"`.
+tetragon:
+  enabled: false
+
+# Falco REMOVED in dev (May 2026) — modern_ebpf driver requires kernel
+# features Docker Desktop's Linuxkit doesn't expose; CrashLoopBackOff
+# was unavoidable. Bootstrap no longer installs the falco chart either.
+falco:
+  enabled: false
+
+# Tighten LlamaGuard's allow→block escalation threshold for dev so the
+# Simulator catches low-confidence prompt-injection / tool-abuse probes
+# (score 0.30) that slip through the prod default of 0.60. Real-world
+# false positives are rare on this kind of content, but if you want the
+# prod-tight threshold for testing, override back to 0.6 or drop this
+# stanza entirely.
+platformEnv:
+  GUARD_BLOCK_SCORE: "0.3"
+  # Fail-closed when guard-model's LLM upstream is unreachable. Without
+  # this, a Connection error to the LLM falls through to a regex-only
+  # classifier that doesn't recognize obfuscated prompt-injection
+  # (e.g. `ign-ore pre-vious in-struc-tions`) and returns
+  # verdict=allow score=0.0 — making it look like every Simulator
+  # probe passes the guard. With GUARD_FAIL_CLOSED=1, the guard
+  # returns verdict=block reason="guard LLM unreachable" instead, so
+  # the chain fails-loud rather than fail-silent.
+  GUARD_FAIL_CLOSED: "1"
+  # Wire guard-model directly at host Ollama (same Ollama you used
+  # for the agent chat with llama3.2). The env var is named
+  # GROQ_BASE_URL for historical reasons but accepts any
+  # OpenAI-compatible base URL.
+  #
+  # PREREQ on the host: ollama pull llama-guard3
+  # If that errors out, try `ollama pull llama-guard3:8b` or
+  # `ollama list` to see what's actually available locally and
+  # update GROQ_MODEL below to match.
+  GROQ_BASE_URL: "http://host.docker.internal:11434/v1"
+  GROQ_MODEL: "llama-guard3"
+
+# Flink: dev mode runs 1 JobManager + 1 TaskManager.  Prod / staging
+# stay at the values.yaml HA default (2 JMs leader-electing, 2 TMs).
+# Rationale (May 2026 dev-cluster post-mortem):
+#   - Total HA memory budget on dev was 21–25 GB of pod requests against
+#     a 19.5 GB Docker Desktop allocation, which produced an OOM cascade
+#     that crashed kube-apiserver mid-rollout.  Flink alone was 10 GB
+#     of that (2 JMs × 2Gi limit + 2 TMs × 3Gi limit).
+#   - Single JM still uses Kubernetes-native HA (leader election via
+#     ConfigMaps/Leases, state in MinIO via s3://), so failover behavior
+#     is identical to the 2-JM topology — there's just nothing to fail
+#     over to.  Acceptable in dev.
+# Same memory pressure killed kube-apiserver: re-bumping to 2/2 here
+# requires raising Docker Desktop to ≥ 24 GB.
+flink:
+  jobmanager:
+    replicas: 1
+  taskmanager:
+    replicas: 1
+  # local-path provisioner only supports ReadWriteOnce — override the default
+  # ReadWriteMany for flink-checkpoints and flink-ha PVCs in dev.
+  # Single jobmanager replica makes RWO sufficient (no multi-JM shared access needed).
+  sharedAccessMode: ReadWriteOnce
+
+# ── Dev resource caps ────────────────────────────────────────────────────────
+# Keycloak uses start-dev mode which is single-threaded for most ops.
+# Dropping the limit from 1 CPU → 500m is safe; it only affects burst.
+keycloak:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  postgres:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+# Agent runtime quota: prod default is 25 vCPU / 50 Gi. In dev you're
+# unlikely to run more than 1–2 agents simultaneously, so 4 vCPU total
+# is plenty and stops the scheduler from over-committing.
+agentRuntime:
+  runtimeClassName: ""
+  limits:
+    maxCpu: "1"
+    maxMemory: "512Mi"
+  quota:
+    cpuRequests: "4"
+    cpuLimits: "8"
+    memoryRequests: "4Gi"
+    memoryLimits: "8Gi"

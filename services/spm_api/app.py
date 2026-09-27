@@ -1,0 +1,1226 @@
+"""
+SPM API — AI Security Posture Management control plane.
+
+Endpoints:
+  POST   /models                    Register a model
+  GET    /models                    List all models (optionally filter by tenant)
+  GET    /models/{model_id}         Get model detail
+  PATCH  /models/{model_id}/status  Lifecycle transition
+  POST   /internal/enforce/{model_id}  Internal: enforcement trigger (from aggregator)
+  GET    /compliance/nist-airm/report  NIST AI RMF compliance report
+  GET    /sbom/refresh              Aggregate AI-SBOM from all CPM services
+  GET    /health
+  GET    /metrics
+  GET    /jwks                      RS256 public key in JWKS format
+"""
+from __future__ import annotations
+import json
+import logging
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import hashlib
+import pathlib
+
+import httpx
+import requests
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from platform_shared.rbac import (
+    IdentityContext,
+    get_current_identity,
+    require_model_read,
+    require_model_write,
+    require_compliance_read,
+    require_audit_read,
+    require_integration_read,
+    require_integration_write,
+)
+
+from spm.db.models import (
+    ComplianceEvidence, ModelRegistry,
+    ModelStatus, ModelProvider, ModelRiskTier, ModelType, PolicyCoverage,
+)
+from spm.db.session import get_db, get_engine, set_app_user
+from spm.db.models import Base
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+log = logging.getLogger("spm-api")
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+OPA_URL               = os.getenv("OPA_URL", "http://opa:8181")
+FREEZE_CONTROLLER_URL = os.getenv("FREEZE_CONTROLLER_URL", "http://freeze-controller:8090")
+JWT_PUBLIC_KEY_PATH   = os.getenv("JWT_PUBLIC_KEY_PATH", "/keys/public.pem")
+KAFKA_BOOTSTRAP       = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-broker:9092")
+SPM_SERVICE_JWT       = os.getenv("SPM_SERVICE_JWT", "")
+# Default upload dir lives under the spm_api service directory, e.g.
+#   services/spm_api/models
+# This keeps uploaded files co-located with the service code and avoids
+# taking a dependency on /data/ mount points.  Override with MODEL_UPLOAD_DIR
+# (absolute path) when running containerised with a volume mount.
+# NOTE: this directory is listed in the repo's .gitignore so uploaded model
+# artefacts never end up in git.
+_SERVICE_DIR          = pathlib.Path(__file__).resolve().parent
+MODEL_UPLOAD_DIR      = os.getenv(
+    "MODEL_UPLOAD_DIR",
+    str(_SERVICE_DIR / "models"),
+)
+MODEL_UPLOAD_MAX_MB   = int(os.getenv("MODEL_UPLOAD_MAX_MB", "8192"))  # 8 GB default cap
+
+
+# ── JWT auth ─────────────────────────────────────────────────────────────────
+
+def _load_public_key() -> str:
+    try:
+        with open(JWT_PUBLIC_KEY_PATH) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return os.getenv("JWT_PUBLIC_KEY", "")
+
+
+def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict:
+    """Thin shim kept for backward compat — route files still reference this
+    via the lazy _app_module() pattern until they migrate to RBAC deps."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = authorization.removeprefix("Bearer ")
+    try:
+        import os as _os
+        from platform_shared.keycloak_auth import decode_token
+        audience = _os.getenv("JWT_AUDIENCE", "aispm-ui")
+        issuer   = _os.getenv("JWT_ISSUER",   "http://keycloak.local:8180/realms/aispm")
+        return decode_token(token, audience=audience, issuer=issuer)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+
+
+def require_admin(claims: Dict = Depends(verify_jwt)) -> Dict:
+    roles = set(claims.get("roles", []))
+    if not (roles & {"spm:admin", "admin"}):
+        raise HTTPException(status_code=403, detail="spm:admin role required")
+    return claims
+
+
+def require_auditor(claims: Dict = Depends(verify_jwt)) -> Dict:
+    roles = set(claims.get("roles", []))
+    if not (roles & {"spm:admin", "admin", "spm:auditor", "auditor"}):
+        raise HTTPException(status_code=403, detail="spm:auditor or spm:admin role required")
+    return claims
+
+
+def require_admin_identity(
+    identity: IdentityContext = Depends(get_current_identity),
+) -> IdentityContext:
+    """Admin gate that yields the IdentityContext (audit finding C2).
+
+    Admin is decided by the Keycloak realm role (`is_admin()` reads
+    `realm_access.roles`), never by the editable RBAC matrix — so the matrix
+    can never grant the right to edit itself.
+    """
+    if not identity.is_admin():
+        raise HTTPException(status_code=403, detail="spm:admin realm role required")
+    return identity
+
+
+_INTERNAL_SECRET_PLACEHOLDER = "internal-secret-changeme"
+
+
+def _require_internal_secret(x_internal_secret: Optional[str] = Header(None)) -> None:
+    """Guard for service-to-service internal routes (audit findings H3, M3)."""
+    import hmac
+    expected = os.getenv("INTERNAL_SERVICE_SECRET", "")
+    # Refuse to authorize with the shipped placeholder or an empty value: the
+    # routes stay inert until a real secret is configured.
+    if not expected or expected == _INTERNAL_SECRET_PLACEHOLDER:
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVICE_SECRET not configured")
+    if not x_internal_secret or not hmac.compare_digest(x_internal_secret, expected):
+        raise HTTPException(status_code=403, detail="Forbidden: invalid internal secret")
+
+
+def _tenant_from_claims(claims: Dict, fallback: str = "global") -> str:
+    """
+    Resolve tenant_id from JWT claims.  System is single-tenant today, but we
+    honour whatever the token carries so an org-aware token doesn't silently
+    land rows in the wrong tenant.  Falls back to `fallback` when nothing is
+    present.
+    """
+    return (
+        claims.get("tenant_id")
+        or claims.get("tenant")
+        or claims.get("org_id")
+        or fallback
+    )
+
+
+def _effective_tenant(identity: IdentityContext) -> str:
+    """Tenant scope for reads and writes, derived from the token ONLY.
+
+    Never trust a client-supplied tenant (query string or form field): that is
+    the cross-tenant read hole in audit finding H4. Falls back to DEFAULT_TENANT
+    (the single-tenant deployment default) when the token carries no tenant.
+    """
+    return identity.tenant_id or os.getenv("DEFAULT_TENANT", "global")
+
+
+# Risk tier thresholds keyed off alerts_count.  Matches the ladder the user
+# defined for the Inventory UI: 0=Low, 1–2=Medium, 3–5=High, 6+=Critical.
+def _risk_tier_from_alerts(alerts: int) -> ModelRiskTier:
+    if alerts <= 0:
+        return ModelRiskTier.low
+    if alerts <= 2:
+        return ModelRiskTier.medium
+    if alerts <= 5:
+        return ModelRiskTier.high
+    return ModelRiskTier.critical
+
+
+# ── Pydantic schemas ──────────────────────────────────────────────────────────
+
+class ModelCreate(BaseModel):
+    name: str
+    version: str
+    provider: str = "local"
+    purpose: Optional[str] = None
+    risk_tier: str = "limited"
+    model_type: Optional[str] = None
+    # Inventory-table fields
+    owner: Optional[str] = None
+    policy_status: Optional[str] = None
+    alerts_count: int = 0
+    tenant_id: Optional[str] = None   # derived from JWT when omitted
+    status: str = "registered"
+    approved_by: Optional[str] = None
+    notes: Optional[str] = None
+    ai_sbom: Dict[str, Any] = {}
+
+
+class ModelResponse(BaseModel):
+    model_id: str
+    name: str
+    version: str
+    provider: str
+    purpose: Optional[str]
+    risk_tier: str
+    model_type: Optional[str]
+    # Inventory-table fields
+    owner: Optional[str]
+    policy_status: Optional[str]
+    alerts_count: int
+    last_seen_at: Optional[str]
+    tenant_id: str
+    status: str
+    approved_by: Optional[str]
+    approved_at: Optional[str]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+    notes: Optional[str] = None
+    ai_sbom: Dict[str, Any] = {}
+
+    @classmethod
+    def from_orm(cls, m: ModelRegistry) -> "ModelResponse":
+        # Always derive risk_tier from the current alerts_count so the UI
+        # chip stays in lockstep with alert volume — the stored `risk_tier`
+        # enum value is treated as a floor that operators can raise, never
+        # lower, but at registration time we report the computed tier.
+        computed_risk = _risk_tier_from_alerts(m.alerts_count or 0)
+        return cls(
+            model_id=str(m.model_id),
+            name=m.name, version=m.version,
+            provider=m.provider.value if m.provider else "local",
+            purpose=m.purpose,
+            risk_tier=computed_risk.value,
+            model_type=m.model_type.value if m.model_type else None,
+            owner=m.owner,
+            policy_status=m.policy_status.value if m.policy_status else None,
+            alerts_count=m.alerts_count or 0,
+            last_seen_at=m.last_seen_at.isoformat() if m.last_seen_at else None,
+            tenant_id=m.tenant_id,
+            status=m.status.value if m.status else "registered",
+            approved_by=m.approved_by,
+            approved_at=m.approved_at.isoformat() if m.approved_at else None,
+            created_at=m.created_at.isoformat() if m.created_at else None,
+            updated_at=m.updated_at.isoformat() if m.updated_at else None,
+            notes=getattr(m, "notes", None),
+            ai_sbom=m.ai_sbom or {},
+        )
+
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
+async def _auto_bootstrap_integrations() -> None:
+    """Idempotently seed the integrations table on every startup.
+
+    Mirrors the logic in POST /integrations/bootstrap but runs as an
+    internal lifespan task so the operator never has to call the endpoint
+    manually.  Safe to run on every pod restart — _upsert_integration is
+    keyed by external_id and only writes env-sourced credentials on first
+    run (won't overwrite keys already stored in the DB).
+    """
+    try:
+        try:
+            from integrations_seed_data import build_seed
+        except ModuleNotFoundError:
+            from services.spm_api.integrations_seed_data import build_seed
+        from integrations_routes import _upsert_integration  # noqa: PLC0415
+        from spm.db.session import get_session_factory  # noqa: PLC0415
+
+        seed_data = build_seed()
+        external_to_uuid: dict = {}
+        async with get_session_factory()() as db:
+            for entry in seed_data:
+                row = await _upsert_integration(db, entry)
+                external_to_uuid[entry["external_id"]] = str(row.id)
+            # Post-pass: resolve external_id cross-references (e.g.
+            # int-022's default_llm_integration_id_external → int-017 UUID)
+            from spm.db.models import Integration as _Integration  # noqa: PLC0415
+            from sqlalchemy import select as _select               # noqa: PLC0415
+            for entry in seed_data:
+                ext_ref = (entry.get("config") or {}).get(
+                    "default_llm_integration_id_external"
+                )
+                if not ext_ref:
+                    continue
+                target_uuid = external_to_uuid.get(ext_ref)
+                if target_uuid is None:
+                    continue
+                result = await db.execute(
+                    _select(_Integration).where(
+                        _Integration.external_id == entry["external_id"]
+                    )
+                )
+                row = result.scalar_one_or_none()
+                if row is None:
+                    continue
+                cfg = dict(row.config or {})
+                if not cfg.get("default_llm_integration_id"):
+                    cfg["default_llm_integration_id"] = target_uuid
+                    row.config = cfg
+            await db.commit()
+        log.info("integrations bootstrap complete — %d rows upserted", len(seed_data))
+    except Exception as exc:  # never crash startup over seed failure
+        log.warning("integrations bootstrap failed (non-fatal): %s", exc)
+
+
+async def _seed_demo_models() -> None:
+    """Idempotently seed ModelRegistry with demo models on startup.
+
+    Seeds 12 realistic models covering varied providers (anthropic, openai,
+    local, internal, aws, azure), risk tiers, statuses, and model types so
+    the Inventory page shows meaningful data out of the box.
+
+    Also seeds 30 days of daily PostureSnapshot history so the Posture page
+    has trend data.
+
+    Non-fatal — a failure here never blocks API startup.
+    """
+    try:
+        from seed_db import seed_models, seed_posture_snapshots, DEMO_MODELS  # type: ignore
+        from spm.db.session import get_session_factory
+
+        factory = get_session_factory()
+        async with factory() as db:
+            n_models = await seed_models(db)
+            log.info("_seed_demo_models: %d new model(s) inserted (%d total defined)",
+                     n_models, len(DEMO_MODELS))
+        async with factory() as db:
+            n_snap = await seed_posture_snapshots(db)
+            if n_snap:
+                log.info("_seed_demo_models: %d posture snapshots inserted", n_snap)
+    except Exception as exc:
+        log.warning("_seed_demo_models failed (non-fatal): %s", exc)
+
+
+async def _seed_system_agents_on_startup() -> None:
+    """Self-healing reconciliation of system-managed agent rows.
+
+    The chart's ``db-seed`` Job seeds these rows on first install, but real
+    clusters drift: someone swaps the DB (CNPG cluster swap → fresh empty
+    spm), the seed Job races startup-orchestrator on a re-install, an
+    operator runs `helm template | kubectl apply` (which doesn't trigger
+    Helm hooks at all), or the row gets manually deleted.  Without this
+    function the symptom is always the same: the threat-hunting-agent
+    Deployment is up and pumping events, but its ``agents`` table row is
+    missing — so clicking Start/Apply-Policy in the UI 500s, the
+    Inventory page misses the SYSTEM badge, and the agent's LLM auth
+    token isn't reconciled with what the chart deployed.
+
+    Calling ``seed_system_agents`` from the spm-api lifespan turns every
+    pod restart into a self-heal pass.  Idempotent (uses
+    ``WHERE name=... AND version=...``-scoped upserts), non-fatal (a
+    failure here never blocks API startup), and cheap (single SELECT +
+    optional INSERT).
+
+    Pairs with:
+      • Layer 1 — chart-level default for ``secrets.threatHuntingAgentLlmKey``
+        in values.yaml (so the env var is always non-empty).
+      • Layer 2 — _is_system_agent guard in services/spm_api/agent_controller
+        (so UI Start/Stop never tries to spawn a non-existent code-blob Pod).
+      • Layer 3 — this function (so the row always exists).
+    Three independent checks; loss of any one still leaves the system
+    functional via the other two.
+    """
+    try:
+        from seed_db import seed_system_agents  # type: ignore
+        from spm.db.session import get_session_factory
+
+        factory = get_session_factory()
+        async with factory() as db:
+            n = await seed_system_agents(db)
+            if n:
+                log.info("_seed_system_agents_on_startup: %d system-agent row(s) reconciled", n)
+            else:
+                log.debug("_seed_system_agents_on_startup: system agents already current")
+    except Exception as exc:
+        log.warning("_seed_system_agents_on_startup failed (non-fatal): %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Create tables + backfill any constraints/indexes the SQLAlchemy
+    # model added since the database was first bootstrapped. Routes
+    # through seed_db.ensure_schema so both the lifespan path and the
+    # data-init Job (db-seed) use the same backfill logic — see
+    # ensure_schema's docstring for the older-create_all rationale
+    # (e.g., posture_snapshots.uq_snapshot constraint, May 2026).
+    from seed_db import ensure_schema  # type: ignore
+    await ensure_schema()
+    # Seed compliance evidence from mapping file
+    await seed_compliance_evidence()
+    # Auto-seed integrations table so the Integrations page is populated
+    # on first deploy without any manual bootstrap call.
+    await _auto_bootstrap_integrations()
+    # Seed demo models + posture history so Inventory / Posture pages are
+    # populated on first deploy without any manual step.
+    await _seed_demo_models()
+    # Self-healing reconciliation of SYSTEM agents (Threat-Hunting-Agent etc).
+    # Runs on every spm-api pod restart, idempotent, non-fatal — see the
+    # function docstring for the full rationale and how it pairs with the
+    # chart-default LLM token + the agent_controller system-agent guard.
+    await _seed_system_agents_on_startup()
+    log.info("spm-api started")
+    yield
+    await get_engine().dispose()
+
+
+app = FastAPI(title="AI SPM API", version="1.0.0", lifespan=lifespan)
+
+# CORS — allow the admin UI (vite dev server) to call this API directly if
+# needed. In production, the UI routes through a proxy and this is a no-op.
+_cors_origins = os.getenv(
+    "SPM_API_CORS_ORIGINS",
+    "http://localhost:3001,http://127.0.0.1:3001",
+).split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    # Bearer-token auth, no cookies — credentials off, explicit method/header
+    # allow-lists instead of wildcards (audit finding M1).
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Internal-Secret"],
+)
+
+
+# ── Health ─────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "spm-api", "ts": int(time.time())}
+
+
+# ── Model Registry ─────────────────────────────────────────────────────────────
+
+def _coerce_enum(enum_cls, value, default):
+    """Return enum_cls(value), or `default` if value is None/empty/invalid."""
+    if value is None or value == "":
+        return default
+    try:
+        return enum_cls(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {enum_cls.__name__} value: {value!r}",
+        )
+
+
+async def _insert_model_row(
+    db: AsyncSession,
+    *,
+    name: str,
+    version: str,
+    provider: ModelProvider,
+    risk_tier: ModelRiskTier,
+    status_val: ModelStatus,
+    model_type: Optional[ModelType],
+    purpose: Optional[str],
+    owner: Optional[str],
+    policy_status: Optional[PolicyCoverage],
+    alerts_count: int,
+    tenant_id: str,
+    approved_by: Optional[str],
+    notes: Optional[str],
+    ai_sbom: Dict[str, Any],
+) -> ModelRegistry:
+    """
+    Insert a new model row.  Raises HTTP 409 if (name, version, tenant_id) is
+    already taken — the UI shows a "this model already exists, bump the
+    version" dialog in that case.
+    """
+    # Explicit duplicate check first so we can return a structured 409
+    # before hitting the DB-level unique constraint.
+    existing = await db.execute(
+        select(ModelRegistry).where(
+            ModelRegistry.name == name,
+            ModelRegistry.version == version,
+            ModelRegistry.tenant_id == tenant_id,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "model_already_exists",
+                "message": (
+                    f"A model named {name!r} with version {version!r} is already "
+                    f"registered in tenant {tenant_id!r}. Bump the version and try again."
+                ),
+                "name": name,
+                "version": version,
+                "tenant_id": tenant_id,
+            },
+        )
+
+    now_ts = datetime.now(tz=timezone.utc)
+    row = ModelRegistry(
+        name=name, version=version, provider=provider,
+        purpose=purpose, risk_tier=risk_tier, model_type=model_type,
+        owner=owner, policy_status=policy_status,
+        alerts_count=alerts_count or 0,
+        last_seen_at=now_ts,            # registration is itself a "sighting"
+        tenant_id=tenant_id, status=status_val,
+        approved_by=approved_by,
+        approved_at=now_ts if approved_by else None,
+        ai_sbom=ai_sbom or {},
+    )
+    # `notes` column may not exist on older DBs that haven't run migration 005.
+    if notes is not None and hasattr(ModelRegistry, "notes"):
+        row.notes = notes
+    db.add(row)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Race: another writer inserted the same (name, version, tenant) between
+        # our pre-check and commit.  Surface the same structured 409.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "model_already_exists",
+                "message": (
+                    f"A model named {name!r} with version {version!r} is already "
+                    f"registered in tenant {tenant_id!r}. Bump the version and try again."
+                ),
+                "name": name,
+                "version": version,
+                "tenant_id": tenant_id,
+            },
+        )
+    await db.refresh(row)
+    return row
+
+
+@app.post("/models", status_code=201)
+async def register_model(
+    body: ModelCreate,
+    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_model_write),
+) -> ModelResponse:
+    """Register a new model. Returns 409 on (name, version, tenant) collision."""
+    await set_app_user(db, identity.user_id)
+    tenant_id = body.tenant_id or identity.tenant_id or "global"
+    # Initial risk is derived from alerts_count; ignore anything the caller
+    # sent so there's one source of truth.
+    initial_risk = _risk_tier_from_alerts(body.alerts_count or 0)
+    row = await _insert_model_row(
+        db,
+        name=body.name, version=body.version,
+        provider=_coerce_enum(ModelProvider, body.provider, ModelProvider.local),
+        risk_tier=initial_risk,
+        status_val=_coerce_enum(ModelStatus, body.status, ModelStatus.registered),
+        model_type=_coerce_enum(ModelType, body.model_type, None) if body.model_type else None,
+        purpose=body.purpose,
+        owner=body.owner,
+        policy_status=_coerce_enum(PolicyCoverage, body.policy_status, None) if body.policy_status else None,
+        alerts_count=body.alerts_count or 0,
+        tenant_id=tenant_id,
+        approved_by=body.approved_by,
+        notes=body.notes,
+        ai_sbom=body.ai_sbom,
+    )
+    return ModelResponse.from_orm(row)
+
+
+# ── Upload endpoint (multipart: metadata + optional model artifact file) ──────
+
+# Reasonable set of extensions for model artifacts; we don't enforce this, but
+# we sanitise the filename against it so an attacker can't upload arbitrary
+# executables with the same filename.
+_ALLOWED_MODEL_EXTS = {
+    ".safetensors", ".gguf", ".ggml", ".bin", ".onnx", ".pt", ".pth",
+    ".ckpt", ".h5", ".tflite", ".pkl", ".tar", ".zip", ".npz", ".msgpack",
+}
+
+
+def _safe_filename(raw: str) -> str:
+    """Strip any path components and normalise whitespace from an uploaded filename."""
+    stem = pathlib.PurePosixPath(raw).name
+    stem = stem.replace("\\", "").strip()
+    # Drop characters that are never useful in a filename on common filesystems
+    return "".join(c for c in stem if c.isalnum() or c in ("-", "_", ".", "+"))
+
+
+async def _persist_upload(file: UploadFile) -> Dict[str, Any]:
+    """
+    Stream `file` to disk under MODEL_UPLOAD_DIR, enforce a size cap, and
+    return a dict suitable for embedding into `ai_sbom["artifact"]`.
+    """
+    upload_dir = pathlib.Path(MODEL_UPLOAD_DIR)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _safe_filename(file.filename or "model.bin") or "model.bin"
+    # Prefix with a UUID so two uploads with the same filename don't collide
+    stored_name = f"{uuid.uuid4().hex}_{safe_name}"
+    target = upload_dir / stored_name
+
+    max_bytes = MODEL_UPLOAD_MAX_MB * 1024 * 1024
+    hasher = hashlib.sha256()
+    written = 0
+    try:
+        with target.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1 MiB
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Uploaded file exceeds {MODEL_UPLOAD_MAX_MB} MB limit",
+                    )
+                hasher.update(chunk)
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Best-effort cleanup on any IO failure
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to store upload: {e}")
+
+    ext = pathlib.Path(safe_name).suffix.lower()
+    return {
+        "filename":      safe_name,
+        "stored_name":   stored_name,
+        "storage_path":  str(target),
+        "size_bytes":    written,
+        "sha256":        hasher.hexdigest(),
+        "content_type":  file.content_type or "application/octet-stream",
+        "extension":     ext,
+        "extension_recognized": ext in _ALLOWED_MODEL_EXTS,
+        "uploaded_at":   datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+@app.post("/models/upload", status_code=201)
+async def register_model_with_file(
+    name:          str           = Form(...),
+    version:       str           = Form("1.0.0"),
+    provider:      str           = Form("local"),
+    risk_tier:     str           = Form("limited"),  # accepted but ignored — derived from alerts
+    model_type:    Optional[str] = Form(None),
+    purpose:       Optional[str] = Form(None),
+    owner:         Optional[str] = Form(None),
+    policy_status: Optional[str] = Form(None),
+    alerts_count:  int           = Form(0),
+    tenant_id:     Optional[str] = Form(None),       # derived from JWT when omitted
+    status:        str           = Form("registered"),
+    approved_by:   Optional[str] = Form(None),
+    notes:         Optional[str] = Form(None),
+    linked_policies: Optional[str] = Form(None),     # JSON array of policy ids
+    ai_sbom:       Optional[str] = Form(None),       # JSON string; optional extra metadata
+    file:          Optional[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_model_write),
+) -> ModelResponse:
+    """
+    Register a model via multipart/form-data, with an optional model file.
+
+    The file (if provided) is streamed to MODEL_UPLOAD_DIR (defaults to
+    <service-dir>/models), sha256'd, and its metadata is embedded in
+    the row's ai_sbom under the "artifact" key.  Returns 409 on duplicate.
+    """
+    await set_app_user(db, identity.user_id)
+    # Tenant comes from the token, never the client-supplied field (audit H4).
+    effective_tenant = _effective_tenant(identity)
+
+    # Parse optional ai_sbom JSON blob
+    sbom: Dict[str, Any] = {}
+    if ai_sbom:
+        try:
+            parsed = json.loads(ai_sbom)
+            if isinstance(parsed, dict):
+                sbom = parsed
+            else:
+                raise ValueError("ai_sbom must be a JSON object")
+        except (ValueError, json.JSONDecodeError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid ai_sbom JSON: {e}")
+
+    # Parse linked_policies list (policy ids from CPM)
+    if linked_policies:
+        try:
+            parsed_lp = json.loads(linked_policies)
+            if not isinstance(parsed_lp, list):
+                raise ValueError("linked_policies must be a JSON array")
+            sbom["linked_policies"] = [str(p) for p in parsed_lp]
+        except (ValueError, json.JSONDecodeError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid linked_policies JSON: {e}")
+
+    # Persist file first — if it fails we don't want a half-registered row
+    if file is not None and file.filename:
+        sbom["artifact"] = await _persist_upload(file)
+
+    row = await _insert_model_row(
+        db,
+        name=name, version=version,
+        provider=_coerce_enum(ModelProvider, provider, ModelProvider.local),
+        risk_tier=_risk_tier_from_alerts(alerts_count or 0),
+        status_val=_coerce_enum(ModelStatus, status, ModelStatus.registered),
+        model_type=_coerce_enum(ModelType, model_type, None) if model_type else None,
+        purpose=purpose,
+        owner=owner,
+        policy_status=_coerce_enum(PolicyCoverage, policy_status, None) if policy_status else None,
+        alerts_count=alerts_count or 0,
+        tenant_id=effective_tenant,
+        approved_by=approved_by,
+        notes=notes,
+        ai_sbom=sbom,
+    )
+    return ModelResponse.from_orm(row)
+
+
+@app.get("/models")
+async def list_models(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_model_read),
+) -> List[ModelResponse]:
+    # Tenant scope comes from the token, never the client (audit H4).
+    stmt = select(ModelRegistry).where(
+        ModelRegistry.tenant_id == _effective_tenant(identity)
+    )
+    # Bounded page so a large registry cannot be pulled in one unbounded read.
+    stmt = stmt.order_by(ModelRegistry.created_at.desc()).limit(limit).offset(offset)
+    result = await db.execute(stmt)
+    return [ModelResponse.from_orm(m) for m in result.scalars().all()]
+
+
+@app.get("/models/{model_id}")
+async def get_model(
+    model_id: str,
+    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_model_read),
+) -> ModelResponse:
+    result = await db.get(ModelRegistry, uuid.UUID(model_id))
+    # 404 (not 403) on a tenant mismatch so cross-tenant existence isn't leaked.
+    if not result or result.tenant_id != _effective_tenant(identity):
+        raise HTTPException(status_code=404, detail="Model not found")
+    return ModelResponse.from_orm(result)
+
+
+class StatusTransition(BaseModel):
+    new_status: str
+    approved_by: Optional[str] = None
+
+
+@app.patch("/models/{model_id}/status")
+async def transition_status(
+    model_id: str,
+    body: StatusTransition,
+    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_model_write),
+) -> ModelResponse:
+    """Transition model lifecycle status. Validates state machine."""
+    await set_app_user(db, identity.user_id)
+    model = await db.get(ModelRegistry, uuid.UUID(model_id))
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    new_status = ModelStatus(body.new_status)
+    if not model.can_transition_to(new_status):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Invalid transition: {model.status.value} → {new_status.value}",
+        )
+
+    model.status = new_status
+    if new_status == ModelStatus.approved:
+        model.approved_by = body.approved_by or identity.user_id
+        model.approved_at = datetime.now(tz=timezone.utc)
+
+    await db.commit()
+    await db.refresh(model)
+
+    # Sync to OPA if retiring or deprecating
+    if new_status in (ModelStatus.retired, ModelStatus.deprecated):
+        await _push_blocked_models_to_opa(db)
+    if new_status == ModelStatus.retired:
+        await _call_freeze_controller(str(model.model_id), model.tenant_id)
+        await _publish_model_event("model_blocked", str(model.model_id), model.tenant_id)
+
+    return ModelResponse.from_orm(model)
+
+
+# ── Internal: Enforcement ─────────────────────────────────────────────────────
+
+@app.post("/internal/enforce/{model_id}", include_in_schema=False)
+async def enforce_model(
+    model_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(_require_internal_secret),
+) -> Dict:
+    """Called by spm-aggregator when risk threshold is exceeded. Idempotent."""
+    model = await db.get(ModelRegistry, uuid.UUID(model_id))
+    if not model:
+        log.warning("Enforcement for unknown model_id=%s — skipping", model_id)
+        return {"status": "skipped", "reason": "model_not_in_registry"}
+
+    if model.status == ModelStatus.retired:
+        return {"status": "already_enforced"}
+
+    model.status = ModelStatus.retired
+    model.approved_by = "spm-enforcement"
+    await db.commit()
+
+    await _push_blocked_models_to_opa(db)
+    await _call_freeze_controller(model_id, model.tenant_id)
+    await _publish_model_event("model_blocked", model_id, model.tenant_id)
+
+    return {"status": "enforced", "model_id": model_id}
+
+
+async def _push_blocked_models_to_opa(db: AsyncSession) -> None:
+    """Push blocked_models (retired) and deprecated_models sets to OPA."""
+    retired_result = await db.execute(
+        select(ModelRegistry.model_id).where(ModelRegistry.status == ModelStatus.retired)
+    )
+    blocked = [str(r) for r in retired_result.scalars().all()]
+
+    deprecated_result = await db.execute(
+        select(ModelRegistry.model_id).where(ModelRegistry.status == ModelStatus.deprecated)
+    )
+    deprecated = [str(r) for r in deprecated_result.scalars().all()]
+
+    for path, data in [("/v1/data/blocked_models", blocked),
+                       ("/v1/data/deprecated_models", deprecated)]:
+        try:
+            resp = requests.put(f"{OPA_URL}{path}", json=data, timeout=5.0)
+            if resp.status_code not in (200, 204):
+                log.warning("OPA push to %s returned %d", path, resp.status_code)
+        except Exception as e:
+            log.error("OPA push to %s failed: %s", path, e)
+
+
+async def _call_freeze_controller(model_id: str, tenant_id: str) -> None:
+    """Call Freeze Controller to freeze access for this model's tenant."""
+    try:
+        resp = requests.post(
+            f"{FREEZE_CONTROLLER_URL}/freeze",
+            json={
+                "scope": "tenant", "tenant_id": tenant_id,
+                "actor": "spm-enforcement",
+                "reason": "model_risk_threshold_exceeded",
+                "model_id": model_id,
+            },
+            headers={"Authorization": f"Bearer {SPM_SERVICE_JWT}"},
+            timeout=10.0,
+        )
+        if resp.status_code not in (200, 201, 409):
+            log.warning("Freeze Controller returned %d", resp.status_code)
+    except Exception as e:
+        log.error("Freeze Controller call failed: %s", e)
+
+
+async def _publish_model_event(event: str, model_id: str, tenant_id: str) -> None:
+    """Publish to cpm.global.model_events Kafka topic."""
+    try:
+        from kafka import KafkaProducer
+        from platform_shared.topics import GlobalTopics
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP,
+            value_serializer=lambda v: json.dumps(v).encode(),
+        )
+        producer.send(GlobalTopics().MODEL_EVENTS, {
+            "event": event, "model_id": model_id,
+            "tenant_id": tenant_id,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        })
+        producer.flush()
+        producer.close()
+    except Exception as e:
+        log.error("Failed to publish model event: %s", e)
+
+
+# ── JWKS endpoint for Grafana ─────────────────────────────────────────────────
+
+@app.get("/jwks")
+async def jwks():
+    """Return RS256 public key in JWKS format for Grafana JWT auth."""
+    import base64
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    pub_key_pem = _load_public_key()
+    if not pub_key_pem:
+        raise HTTPException(status_code=503, detail="Public key not available")
+    try:
+        pub = load_pem_public_key(pub_key_pem.encode())
+        pub_numbers = pub.public_numbers()
+        def to_b64url(n: int) -> str:
+            length = (n.bit_length() + 7) // 8
+            return base64.urlsafe_b64encode(n.to_bytes(length, "big")).rstrip(b"=").decode()
+        return {
+            "keys": [{
+                "kty": "RSA", "use": "sig", "alg": "RS256", "kid": "cpm-key-1",
+                "n": to_b64url(pub_numbers.n),
+                "e": to_b64url(pub_numbers.e),
+            }]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"JWKS generation failed: {e}")
+
+
+# ── Compliance ─────────────────────────────────────────────────────────────────
+
+async def seed_compliance_evidence():
+    """Seed compliance_evidence from nist_airm_mapping.json if table is empty."""
+    mapping_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "spm", "compliance", "nist_airm_mapping.json")
+    if not os.path.exists(mapping_path):
+        log.warning("NIST AI RMF mapping file not found at %s", mapping_path)
+        return
+    with open(mapping_path) as f:
+        controls = json.load(f)
+    from spm.db.session import get_session_factory
+    factory = get_session_factory()
+    async with factory() as db:
+        result = await db.execute(select(ComplianceEvidence).limit(1))
+        if result.scalar_one_or_none():
+            return  # already seeded
+        for c in controls:
+            db.add(ComplianceEvidence(
+                framework=c["framework"], function=c["function"],
+                category=c["category"], subcategory=c.get("subcategory"),
+                cpm_control=c["cpm_control"], status="not_satisfied",
+            ))
+        await db.commit()
+    log.info("Seeded %d compliance controls", len(controls))
+
+
+_REPORT_CACHE_TTL_S = int(os.getenv("COMPLIANCE_REPORT_CACHE_S", "60"))
+_report_cache: Dict[tuple, tuple] = {}
+
+
+@app.get("/compliance/nist-airm/report")
+async def compliance_report(
+    format: str = "json",
+    # Defaults to NIST_AI_RMF so existing callers of this endpoint keep
+    # getting exactly what they got before OWASP/EU_AI_ACT/ISO_42001 mapping
+    # files existed (backward compatible — see architecture plan §M).
+    # Pass framework=OWASP_LLM_TOP10 / EU_AI_ACT / ISO_42001 / all for the others.
+    framework: str = "NIST_AI_RMF",
+    db: AsyncSession = Depends(get_db),
+    _identity: IdentityContext = Depends(require_compliance_read),
+):
+    """Generate a compliance report for the requested framework (default NIST AI RMF)."""
+    # Evaluating every control walks the evidence tables; the report is
+    # cached per (tenant, framework, format) for a short window so a
+    # dashboard refresh or several auditors reading at once do not each
+    # trigger a full re-evaluation.
+    cache_key = (getattr(_identity, "tenant_id", None) or "global", framework, format)
+    cached = _report_cache.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    from spm.compliance.evaluator import evaluate_all_controls
+    await evaluate_all_controls(db)
+
+    query = select(ComplianceEvidence)
+    if framework != "all":
+        query = query.where(ComplianceEvidence.framework == framework)
+    result = await db.execute(query)
+    controls = result.scalars().all()
+
+    functions: Dict[str, Dict] = {}
+    for c in controls:
+        fn = c.function
+        if fn not in functions:
+            functions[fn] = {"function": fn, "controls": [], "gaps": [],
+                             "satisfied": 0, "total": 0}
+        functions[fn]["total"] += 1
+        if c.status and c.status.value == "satisfied":
+            functions[fn]["satisfied"] += 1
+        else:
+            functions[fn]["gaps"].append({
+                "category": c.category, "control": c.cpm_control,
+                "status": c.status.value if c.status else "not_satisfied",
+            })
+        functions[fn]["controls"].append({
+            "category": c.category, "cpm_control": c.cpm_control,
+            "subcategory": c.subcategory, "framework": c.framework,
+            "status": c.status.value if c.status else "not_satisfied",
+        })
+
+    total_satisfied = sum(f["satisfied"] for f in functions.values())
+    total_controls  = sum(f["total"] for f in functions.values())
+    coverage = round(total_satisfied / total_controls * 100, 1) if total_controls else 0
+
+    for fn in functions.values():
+        fn["coverage_pct"] = round(fn["satisfied"] / fn["total"] * 100, 1) if fn["total"] else 0
+
+    report = {
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "framework": framework,
+        "overall_coverage_pct": coverage,
+        "functions": list(functions.values()),
+    }
+
+    if format == "pdf":
+        from spm.compliance.evaluator import render_pdf
+        pdf_bytes = render_pdf(report)
+        return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers={"Content-Disposition": "attachment; filename=nist-airm-report.pdf"})
+
+    _resp = JSONResponse(report)
+    _resp.headers["Cache-Control"] = f"private, max-age={_REPORT_CACHE_TTL_S}"
+    _report_cache[cache_key] = (time.monotonic() + _REPORT_CACHE_TTL_S, _resp)
+    return _resp
+
+
+# ── AI-SBOM ────────────────────────────────────────────────────────────────────
+
+CPM_INVENTORY_ENDPOINTS = [
+    os.getenv("CPM_API_URL", "http://api:8080") + "/inventory",
+    os.getenv("GUARD_MODEL_URL", "http://guard-model:8200") + "/inventory",
+    os.getenv("FREEZE_CONTROLLER_URL", "http://freeze-controller:8090") + "/inventory",
+    os.getenv("POLICY_SIMULATOR_URL", "http://policy-simulator:8091") + "/inventory",
+]
+
+
+@app.get("/sbom/refresh")
+async def refresh_sbom(
+    db: AsyncSession = Depends(get_db),
+    _identity: IdentityContext = Depends(require_model_read),
+) -> Dict:
+    """Aggregate AI-SBOM from all CPM service /inventory endpoints."""
+    components = []
+    unavailable = []
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for endpoint in CPM_INVENTORY_ENDPOINTS:
+            try:
+                resp = await client.get(endpoint)
+                if resp.status_code == 200:
+                    components.append(resp.json())
+                else:
+                    unavailable.append({"endpoint": endpoint, "status": resp.status_code})
+            except Exception as e:
+                unavailable.append({"endpoint": endpoint, "error": str(e)})
+
+    sbom = {
+        "schema_version": "1.0",
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "components": components,
+        "unavailable_services": unavailable,
+    }
+    return sbom
+
+
+# ── RBAC matrix endpoints ────────────────────────────────────────────────────────
+
+from platform_shared.rbac import Permission as _Permission, _ROLE_PERMISSIONS as _HARDCODED_MATRIX  # noqa: E402
+from spm.db.models import RbacRolePermission as _RbacRow  # noqa: E402
+
+_MANAGED_ROLES = ["spm:viewer", "spm:auditor", "spm:security-analyst", "spm:admin"]
+_ALL_PERMISSIONS = [p.value for p in _Permission]
+
+
+def _build_matrix_from_db(rows: List) -> Dict[str, Dict[str, bool]]:
+    """Overlay DB rows on top of hardcoded defaults."""
+    # Start from defaults
+    matrix: Dict[str, Dict[str, bool]] = {}
+    for role in _MANAGED_ROLES:
+        role_perms = _HARDCODED_MATRIX.get(role, frozenset())
+        matrix[role] = {p: (p in {x.value for x in role_perms}) for p in _ALL_PERMISSIONS}
+    # Apply DB overrides
+    for row in rows:
+        if row.role in matrix and row.permission in matrix[row.role]:
+            matrix[row.role][row.permission] = row.granted
+    return matrix
+
+
+@app.get("/rbac/matrix")
+async def get_rbac_matrix(
+    db: AsyncSession = Depends(get_db),
+    _identity: IdentityContext = Depends(require_audit_read),
+) -> Dict:
+    """Return the full RBAC permission matrix. Any authenticated user with audit.read may view."""
+    result = await db.execute(select(_RbacRow))
+    rows = result.scalars().all()
+    return _build_matrix_from_db(rows)
+
+
+class RbacMatrixUpdate(BaseModel):
+    matrix: Dict[str, Dict[str, bool]]
+
+
+@app.put("/rbac/matrix")
+async def put_rbac_matrix(
+    body: RbacMatrixUpdate,
+    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_admin_identity),
+) -> Dict:
+    """Upsert RBAC matrix overrides. Only spm:admin (realm role) may call this.
+
+    Accepts the same shape returned by GET /rbac/matrix:
+      { "spm:viewer": { "session.read": true, ... }, ... }
+
+    Guarded by the realm admin role via require_admin_identity so a mere
+    model-writer cannot rewrite the matrix to escalate itself (audit C2).
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
+
+    for role, perms in body.matrix.items():
+        if role not in _MANAGED_ROLES:
+            continue
+        for perm, granted in perms.items():
+            if perm not in _ALL_PERMISSIONS:
+                continue
+            stmt = pg_insert(_RbacRow).values(
+                id=uuid.uuid4(),
+                role=role,
+                permission=perm,
+                granted=bool(granted),
+                updated_by=identity.user_id,
+            ).on_conflict_do_update(
+                index_elements=["role", "permission"],
+                set_={"granted": bool(granted), "updated_by": identity.user_id},
+            )
+            await db.execute(stmt)
+
+    await db.commit()
+
+    # Audit the privileged change (actor, tenant, what changed).
+    try:
+        from platform_shared.audit import emit_audit
+        emit_audit(
+            tenant_id=identity.tenant_id or "global",
+            component="spm-api",
+            event_type="rbac.matrix.updated",
+            principal=identity.user_id,
+            severity="warning",
+            details={"roles": sorted(body.matrix.keys())},
+        )
+    except Exception:  # never let auditing break the request
+        logging.getLogger(__name__).warning("failed to emit rbac.matrix.updated audit event")
+
+    result = await db.execute(select(_RbacRow))
+    rows = result.scalars().all()
+    return _build_matrix_from_db(rows)
+
+
+# ── Prometheus metrics ─────────────────────────────────────────────────────────
+
+from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
+Instrumentator().instrument(app).expose(app)
+
+
+# ── Integrations module ───────────────────────────────────────────────────────
+# Routes live in a sibling module because the 15+ endpoints + 8-table
+# serialization surface would bloat this file.  See integrations_routes.py.
+# The Dockerfile flattens the service dir onto /app/, so the sibling is
+# importable by its bare name at runtime.  When running tests from the repo
+# root we fall through to the packaged path under services/spm_api/.
+try:
+    from integrations_routes import router as integrations_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.integrations_routes import router as integrations_router  # noqa: E402
+app.include_router(integrations_router)
+
+# Agent runtime control plane — Phase 1 backend. Mounted last so its
+# routes appear in OpenAPI under the existing tags grouping.
+try:
+    from agent_routes import router as agent_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.agent_routes import router as agent_router  # noqa: E402
+app.include_router(agent_router)
+
+# Phase 4 — agent → policy attachment + chat pipeline.
+try:
+    from agent_policies_routes import router as agent_policies_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.agent_policies_routes import router as agent_policies_router  # noqa: E402
+app.include_router(agent_policies_router)
+
+try:
+    from agent_chat import router as agent_chat_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.agent_chat import router as agent_chat_router  # noqa: E402
+app.include_router(agent_chat_router)
+
+# Posture — surfaces seeded posture_snapshots so the UI Posture page can
+# show real data instead of hardcoded constants. seed_db.py writes 30
+# daily rows on first boot; this endpoint reads them back.
+try:
+    from posture_routes import router as posture_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.posture_routes import router as posture_router  # noqa: E402
+app.include_router(posture_router)
+
+# AI-BOM — typed component/relationship graph over model_registry + agents.
+# See architecture plan Phase 2.
+try:
+    from bom_routes import router as bom_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.bom_routes import router as bom_router  # noqa: E402
+app.include_router(bom_router)
+
+# ── Enterprise visibility routers (shadow AI, machine identities, code guardrails) ──
+try:
+    from discovery_routes import router as discovery_router  # type: ignore  # noqa: E402
+    from identity_routes import router as identity_router    # type: ignore  # noqa: E402
+    from codeguard_routes import router as codeguard_router  # type: ignore  # noqa: E402
+    from identity_trust_routes import router as identity_trust_router  # type: ignore  # noqa: E402
+    from automation_routes import router as automation_router  # type: ignore  # noqa: E402
+except ImportError:  # pragma: no cover - repo-root imports for tests
+    from services.spm_api.discovery_routes import router as discovery_router  # noqa: E402
+    from services.spm_api.identity_routes import router as identity_router    # noqa: E402
+    from services.spm_api.codeguard_routes import router as codeguard_router  # noqa: E402
+    from services.spm_api.identity_trust_routes import router as identity_trust_router  # noqa: E402
+    from services.spm_api.automation_routes import router as automation_router  # noqa: E402
+app.include_router(discovery_router)
+app.include_router(identity_router)
+app.include_router(codeguard_router)
+app.include_router(identity_trust_router)
+app.include_router(automation_router)

@@ -1,0 +1,239 @@
+# .github/workflows/sbom.yml
+#
+# SBOM & Signing — Syft + cosign (keyless, Sigstore)
+#
+# For every push to main and every published release:
+#   1. Build each of the 23 service images and push to GHCR
+#   2. Generate an SPDX-JSON SBOM with Syft
+#   3. Sign the image (keyless OIDC → Sigstore Rekor transparency log)
+#   4. Attest the SBOM to the image digest (--type spdxjson)
+#   5. Run Grype against the SBOM for vuln data, attest that too
+# Plus a separate job that produces a repo-wide source SBOM, signed as
+# a detached blob signature.
+#
+# Verification (anyone, no secrets needed):
+#   cosign verify-attestation \
+#     --type spdxjson \
+#     --certificate-identity-regexp "https://github.com/${{ github.repository }}/.+" \
+#     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+#     ghcr.io/<owner>/aispm-api@<digest>
+
+name: SBOM & Signing
+
+"on":
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write       # push to GHCR
+  id-token: write       # cosign keyless via GitHub OIDC
+  attestations: write   # GitHub native build provenance (belt + braces)
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Per-image: build → push → SBOM → sign → attest → vuln-scan → attest
+  # ───────────────────────────────────────────────────────────────────────────
+  build-sign-attest:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Image names mirror deploy/helm/aispm/values.yaml `images.*.repository`.
+          # Build context is repo root (.) for every service whose Dockerfile uses
+          # repo-rooted COPY paths like `COPY services/api/...`. See the comment
+          # in deploy/scripts/build-images.sh — same invariant applies here.
+          # Only `ui` uses a local context because its Dockerfile uses paths
+          # relative to ui/ (`COPY package.json ./`).
+          - { image: aispm-api,                context: .,  dockerfile: services/api/Dockerfile }
+          - { image: aispm-guard-model,        context: .,  dockerfile: services/guard_model/Dockerfile }
+          - { image: aispm-garak-runner,       context: .,  dockerfile: services/garak/Dockerfile }
+          - { image: aispm-retrieval-gw,       context: .,  dockerfile: services/retrieval_gateway/Dockerfile }
+          - { image: aispm-processor,          context: .,  dockerfile: services/processor/Dockerfile }
+          - { image: aispm-policy-decider,     context: .,  dockerfile: services/policy_decider/Dockerfile }
+          - { image: aispm-agent,              context: .,  dockerfile: services/agent/Dockerfile }
+          - { image: aispm-memory,             context: .,  dockerfile: services/memory_service/Dockerfile }
+          - { image: aispm-executor,           context: .,  dockerfile: services/executor/Dockerfile }
+          - { image: aispm-tool-parser,        context: .,  dockerfile: services/tool_parser/Dockerfile }
+          - { image: aispm-output-guard,       context: .,  dockerfile: services/output_guard/Dockerfile }
+          - { image: aispm-freeze-ctrl,        context: .,  dockerfile: services/freeze_controller/Dockerfile }
+          - { image: aispm-policy-sim,         context: .,  dockerfile: services/policy_simulator/Dockerfile }
+          - { image: aispm-spm-api,            context: .,  dockerfile: services/spm_api/Dockerfile }
+          - { image: aispm-spm-mcp,            context: .,  dockerfile: services/spm_mcp/Dockerfile }
+          - { image: aispm-spm-llm-proxy,      context: .,  dockerfile: services/spm_llm_proxy/Dockerfile }
+          - { image: aispm-spm-aggregator,     context: .,  dockerfile: services/spm_aggregator/Dockerfile }
+          - { image: aispm-agent-orchestrator, context: .,  dockerfile: services/agent-orchestrator-service/Dockerfile }
+          - { image: aispm-threat-hunter,      context: .,  dockerfile: services/threat-hunting-agent/Dockerfile }
+          - { image: aispm-ui,                 context: ui, dockerfile: ui/Dockerfile }
+          - { image: aispm-startup-orch,       context: .,  dockerfile: services/startup_orchestrator/Dockerfile }
+          - { image: aispm-flink-pyjob,        context: .,  dockerfile: services/flink_pyjob/Dockerfile }
+          - { image: aispm-agent-runtime,      context: .,  dockerfile: agent_runtime/Dockerfile }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GHCR repository paths must be lowercase. Normalise once and reuse.
+      # We emit two outputs:
+      #   image_ref   → ghcr.io/owner/image:<sha>   used by docker/cosign
+      #   image_repo  → ghcr.io/owner/image         used by actions/attest-*
+      #                 (those actions reject any tag/digest in subject-name)
+      - name: Compute image ref
+        id: ref
+        run: |
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO="${REGISTRY}/${OWNER_LC}/${{ matrix.image }}"
+          REF="${REPO}:${{ github.sha }}"
+          echo "image_repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${REF}"   >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.ref.outputs.image_ref }}
+          # cache scope bumped to v2 after switching to repo-root build context;
+          # old v1 cache entries reference paths from the per-service context
+          # and cause "failed to compute cache key" errors. Bump again on any
+          # future context-shape change.
+          cache-from: type=gha,scope=${{ matrix.image }}-v2
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-v2
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # ── Syft: SBOM in SPDX JSON ────────────────────────────────────────────
+      - name: Generate SBOM (Syft, SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.ref.outputs.image_ref }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.image }}.spdx.json
+          upload-artifact: true
+
+      # ── cosign sign + attest, keyless (GitHub OIDC → Sigstore Fulcio) ──────
+      - name: Sign image (keyless)
+        run: |
+          cosign sign --yes \
+            "${{ steps.ref.outputs.image_ref }}@${{ steps.build.outputs.digest }}"
+
+      - name: Attest SBOM to image
+        run: |
+          cosign attest --yes \
+            --predicate "sbom-${{ matrix.image }}.spdx.json" \
+            --type spdxjson \
+            "${{ steps.ref.outputs.image_ref }}@${{ steps.build.outputs.digest }}"
+
+      # ── Grype: vulnerability report from the SBOM ─────────────────────────
+      # We install grype directly rather than using anchore/scan-action because
+      # the action's --output-file parameter is unreliable for JSON output;
+      # running the binary writes to a path we control deterministically.
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.88.0
+
+      - name: Vulnerability scan (Grype)
+        id: grype
+        run: |
+          grype "sbom:sbom-${{ matrix.image }}.spdx.json" \
+            -o json \
+            --file "vuln-${{ matrix.image }}.json"
+          # Show a quick severity summary in the log
+          jq '.matches | group_by(.vulnerability.severity)
+              | map({severity: .[0].vulnerability.severity, count: length})' \
+            "vuln-${{ matrix.image }}.json"
+          # Defensive: confirm the file actually exists for the next step
+          ls -la "vuln-${{ matrix.image }}.json"
+
+      - name: Attest vuln report to image
+        run: |
+          cosign attest --yes \
+            --predicate "vuln-${{ matrix.image }}.json" \
+            --type vuln \
+            "${{ steps.ref.outputs.image_ref }}@${{ steps.build.outputs.digest }}"
+
+      # ── GitHub-native attestation (mirrors Sigstore, viewable in UI) ───────
+      - name: GitHub build provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          # subject-name must be the bare repo (no tag/digest) — the action
+          # rejects "ghcr.io/owner/image:tag" with "Invalid image name".
+          subject-name: ${{ steps.ref.outputs.image_repo }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.image }}
+          path: |
+            sbom-${{ matrix.image }}.spdx.json
+            vuln-${{ matrix.image }}.json
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Repo-wide source SBOM (signed as detached blob signature)
+  # ───────────────────────────────────────────────────────────────────────────
+  source-sbom:
+    name: Source SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate source SBOM (Syft over repo)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: aispm-source.spdx.json
+          upload-artifact: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SBOM (detached, keyless)
+        run: |
+          cosign sign-blob --yes \
+            --output-signature aispm-source.spdx.json.sig \
+            --output-certificate aispm-source.spdx.json.crt \
+            aispm-source.spdx.json
+
+      - name: Upload signed source SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-sbom
+          path: |
+            aispm-source.spdx.json
+            aispm-source.spdx.json.sig
+            aispm-source.spdx.json.crt
+
+      # On a release tag, attach the signed SBOM to the GitHub Release
+      - name: Attach to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            aispm-source.spdx.json
+            aispm-source.spdx.json.sig
+            aispm-source.spdx.json.crt

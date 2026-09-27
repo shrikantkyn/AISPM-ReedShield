@@ -1,0 +1,73 @@
+# deploy/helm/aispm/templates/api-deployment.yaml
+#
+# 2 replicas + topology spread = no SPOF.  WebSocket sessions are
+# pinned to one pod via the Service's `sessionAffinity: ClientIP` —
+# a pod loss disconnects only the users whose ClientIP hashed to that
+# pod (clients then reconnect, the affinity table updates, and they
+# land on the surviving pod).  BackgroundTasks that mutate per-pod
+# state are still a known SPOF for individual in-flight tasks; track
+# the follow-up "extract WS state to Redis" before promoting the api
+# beyond a soft-real-time best-effort tier.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.api.replicas | default 2 }}
+  selector:
+    matchLabels: { app: api }
+  template:
+    metadata:
+      labels: { app: api }
+    spec:
+      serviceAccountName: spm-api
+      containers:
+        - name: api
+          image: {{ include "aispm.image" .Values.images.api }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: SPM_DB_URL
+              value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+            - name: GARAK_RUNNER_URL
+              value: "http://garak-runner.{{ .Values.global.namespace }}.svc.cluster.local:8099"
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+          # Probe tuning: api gets briefly slow under Garak / chat load
+          # (waiting on guard-model / spm-llm-proxy / Postgres). The
+          # default 1s timeout + 3-failure threshold killed the pod
+          # mid-simulation, breaking the WebSocket that streams
+          # terminal events back to the UI ("Simulation timeout — no
+          # terminal event received"). 5s timeout + 6 failures gives
+          # ~120s tolerance under load before the pod is restarted.
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0444

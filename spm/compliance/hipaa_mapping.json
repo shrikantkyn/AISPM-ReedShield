@@ -1,0 +1,114 @@
+[
+  {
+    "framework": "HIPAA",
+    "function": "ADMINISTRATIVE",
+    "category": "HIPAA-164.308(a)(1)",
+    "subcategory": "164.308(a)(1) Security management: risk analysis and risk management are continuous",
+    "cpm_control": "Posture risk fusion",
+    "evaluation_rule": "risk_fusion_active"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "ADMINISTRATIVE",
+    "category": "HIPAA-164.308(a)(3)",
+    "subcategory": "164.308(a)(3) Workforce security: access is role-based",
+    "cpm_control": "RBAC matrix",
+    "evaluation_rule": "rbac_matrix_defined"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "ADMINISTRATIVE",
+    "category": "HIPAA-164.308(a)(4)",
+    "subcategory": "164.308(a)(4) Information access management: machine identities least-privilege",
+    "cpm_control": "Machine identity register",
+    "evaluation_rule": "nhi_register_current"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "ADMINISTRATIVE",
+    "category": "HIPAA-164.308(a)(5)",
+    "subcategory": "164.308(a)(5) Log-in monitoring and protection from malicious software",
+    "cpm_control": "Guard model + monitoring",
+    "evaluation_rule": "prometheus_reachable"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "ADMINISTRATIVE",
+    "category": "HIPAA-164.308(a)(6)",
+    "subcategory": "164.308(a)(6) Security incident procedures: identify, respond, document",
+    "cpm_control": "Cases workflow",
+    "evaluation_rule": "incident_case_workflow"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "ADMINISTRATIVE",
+    "category": "HIPAA-164.308(a)(8)",
+    "subcategory": "164.308(a)(8) Evaluation: periodic technical evaluation (red team, scans)",
+    "cpm_control": "Simulation Lab / ModelScan",
+    "evaluation_rule": "redteam_run_recent"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "ADMINISTRATIVE",
+    "category": "HIPAA-164.308(a)(1)(ii)(D)",
+    "subcategory": "164.308(a)(1)(ii)(D) Information system activity review: shadow AI usage reviewed",
+    "cpm_control": "Shadow AI discovery",
+    "evaluation_rule": "shadow_ai_policy_enforced"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "TECHNICAL",
+    "category": "HIPAA-164.312(a)(1)",
+    "subcategory": "164.312(a)(1) Access control: unique identity and enforced authorization",
+    "cpm_control": "Keycloak + OPA",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "TECHNICAL",
+    "category": "HIPAA-164.312(b)",
+    "subcategory": "164.312(b) Audit controls: activity in systems handling ePHI is recorded",
+    "cpm_control": "Audit export",
+    "evaluation_rule": "audit_export_recent"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "TECHNICAL",
+    "category": "HIPAA-164.312(c)(1)",
+    "subcategory": "164.312(c)(1) Integrity: model artefacts hashed and scanned",
+    "cpm_control": "ModelScan + SHA-256",
+    "evaluation_rule": "model_security_scanner_reachable"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "TECHNICAL",
+    "category": "HIPAA-164.312(e)(1)",
+    "subcategory": "164.312(e)(1) Transmission security: PHI not leaked in AI responses",
+    "cpm_control": "Output guard",
+    "evaluation_rule": "pii_redaction_enabled"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "TECHNICAL",
+    "category": "HIPAA-164.312(e)(2)",
+    "subcategory": "164.312(e)(2) Encryption of credentials and secrets at rest",
+    "cpm_control": "Credential rotation + encryption",
+    "evaluation_rule": "integration_credentials_rotated"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "BREACH_NOTIFICATION",
+    "category": "HIPAA-164.404",
+    "subcategory": "164.404 Breach notification to individuals within 60 days: clock and runbook",
+    "cpm_control": "Breach clock (shared runbook)",
+    "evaluation_rule": "breach_runbook_ready"
+  },
+  {
+    "framework": "HIPAA",
+    "function": "BUSINESS_ASSOCIATES",
+    "category": "HIPAA-164.314",
+    "subcategory": "164.314 Business associates: third-party AI processors inventoried",
+    "cpm_control": "AI-BOM + cross-border register",
+    "evaluation_rule": "bom_licenses_allowed"
+  }
+]

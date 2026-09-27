@@ -1,0 +1,106 @@
+[
+  {
+    "framework": "IRDAI",
+    "function": "GOVERNANCE",
+    "category": "IRDAI-ICS-3",
+    "subcategory": "Guidelines 2023 s.3 Governance: CISO-owned security policy enforced",
+    "cpm_control": "OPA bundles",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "IDENTIFY",
+    "category": "IRDAI-ICS-5",
+    "subcategory": "s.5 Asset management: AI models, agents and SaaS inventoried",
+    "cpm_control": "Registry + shadow AI discovery",
+    "evaluation_rule": "shadow_ai_policy_enforced"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "PROTECT",
+    "category": "IRDAI-ICS-6",
+    "subcategory": "s.6 Access control: role-based access and machine identity ownership",
+    "cpm_control": "RBAC + machine identity register",
+    "evaluation_rule": "nhi_register_current"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "PROTECT",
+    "category": "IRDAI-ICS-7",
+    "subcategory": "s.7 Data classification and privacy: policyholder PII protected in AI outputs",
+    "cpm_control": "Output guard",
+    "evaluation_rule": "pii_redaction_enabled"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "PROTECT",
+    "category": "IRDAI-ICS-8",
+    "subcategory": "s.8 Cryptography and key management: credentials rotated",
+    "cpm_control": "Credential rotation",
+    "evaluation_rule": "integration_credentials_rotated"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "PROTECT",
+    "category": "IRDAI-ICS-9",
+    "subcategory": "s.9 Application security: secure development and pre-release scanning",
+    "cpm_control": "Code Guardrails",
+    "evaluation_rule": "codeguard_scan_recent"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "PROTECT",
+    "category": "IRDAI-ICS-11",
+    "subcategory": "s.11 Third-party and outsourcing risk: AI components and processors inventoried",
+    "cpm_control": "AI-BOM license policy",
+    "evaluation_rule": "bom_licenses_allowed"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "DETECT",
+    "category": "IRDAI-ICS-12",
+    "subcategory": "s.12 Logging and monitoring: continuous monitoring of AI activity",
+    "cpm_control": "Prometheus + CEP",
+    "evaluation_rule": "prometheus_reachable"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "DETECT",
+    "category": "IRDAI-ICS-13",
+    "subcategory": "s.13 Vulnerability assessment and penetration testing: AI red teaming",
+    "cpm_control": "Simulation Lab / Garak",
+    "evaluation_rule": "redteam_run_recent"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "RESPOND",
+    "category": "IRDAI-ICS-14",
+    "subcategory": "s.14 Cyber incident management and reporting within 6 hours",
+    "cpm_control": "Cases + breach clock",
+    "evaluation_rule": "breach_runbook_ready"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "RESPOND",
+    "category": "IRDAI-ICS-14b",
+    "subcategory": "s.14 Incident response process: alerts to cases with owners",
+    "cpm_control": "Cases workflow",
+    "evaluation_rule": "incident_case_workflow"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "EMERGING_TECH",
+    "category": "IRDAI-ICS-17",
+    "subcategory": "s.17 Emerging technologies (AI/ML): model risk assessed before deployment",
+    "cpm_control": "ModelScan + model gate",
+    "evaluation_rule": "model_security_scanner_reachable"
+  },
+  {
+    "framework": "IRDAI",
+    "function": "EMERGING_TECH",
+    "category": "IRDAI-ICS-17b",
+    "subcategory": "s.17 AI model approval and change control",
+    "cpm_control": "Model status gate",
+    "evaluation_rule": "model_approved_exists"
+  }
+]

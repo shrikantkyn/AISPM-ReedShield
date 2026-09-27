@@ -1,0 +1,107 @@
+# deploy/helm/aispm/templates/flink-taskmanager-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  # Default 2 TMs so slot capacity survives a 1-node loss (the JM still
+  # has slots from the surviving TM and can re-issue tasks).  Single-TM
+  # deployments are not supported since May 2026 — match the JM's HA
+  # contract (2 JMs leader-electing) at the worker tier.
+  replicas: {{ .Values.flink.taskmanager.replicas | default 2 }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: flink-taskmanager }
+  template:
+    metadata:
+      labels: { app: flink-taskmanager }
+      annotations:
+        # Same probe-rewrite race the JM hits — see comment in
+        # flink-jobmanager-statefulset.yaml.  TMs talk to JMs and Kafka
+        # over plain TCP/Pekko, no benefit from sidecar mTLS.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: flink
+      # Spread TM replicas across nodes on multi-node clusters so slot
+      # capacity stays distributed when a node goes down.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: flink-taskmanager }
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: flink-taskmanager
+          image: {{ include "aispm.image" .Values.images.flinkJob }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["taskmanager"]
+          env:
+            # Kafka bootstrap — needed by Python CEP operators when building
+            # KafkaSource / KafkaSink inside the TaskManager process.
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            # CEP thresholds — read by state.py and detection.py at module load.
+            # The TaskManager runs Python user code in-process (pemja), so these
+            # env vars must live on the TM container, not only on the submitter.
+            - name: CEP_SHORT_WINDOW_SEC
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SHORT_WINDOW_SEC
+            - name: CEP_LONG_WINDOW_SEC
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_LONG_WINDOW_SEC
+            - name: CEP_SHORT_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SHORT_THRESHOLD
+            - name: CEP_LONG_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_LONG_THRESHOLD
+            - name: CEP_INTENT_DRIFT_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_INTENT_DRIFT_THRESHOLD
+            - name: CEP_SESSION_HISTORY_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SESSION_HISTORY_SIZE
+          resources:
+            requests:
+              cpu: {{ .Values.flink.taskmanager.resources.requests.cpu | quote }}
+              memory: {{ .Values.flink.taskmanager.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.flink.taskmanager.resources.limits.cpu | quote }}
+              memory: {{ .Values.flink.taskmanager.resources.limits.memory | quote }}
+          volumeMounts:
+            - name: flink-conf
+              mountPath: /opt/flink/conf/flink-conf.yaml
+              subPath: flink-conf.yaml
+            - name: state
+              mountPath: /flink/checkpoints
+      volumes:
+        - name: flink-conf
+          configMap:
+            name: flink-conf
+        - name: state
+          persistentVolumeClaim:
+            claimName: flink-taskmanager-state

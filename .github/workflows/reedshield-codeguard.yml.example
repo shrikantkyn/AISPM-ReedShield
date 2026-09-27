@@ -1,0 +1,34 @@
+# ReedShield Code Guardrails — pull-request gate.
+# Copy to .github/workflows/reedshield-codeguard.yml in any repository that builds
+# AI applications. Fails the check on CRITICAL or HIGH findings and records the
+# scan in ReedShield when REEDSHIELD_URL and REEDSHIELD_TOKEN are configured as secrets.
+name: ReedShield Code Guardrails
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  codeguard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch the ReedShield scanner
+        run: |
+          mkdir -p reedshield && curl -sSfL "${REEDSHIELD_SCANNER_URL:-https://raw.githubusercontent.com/your-org/reedshield/main/scripts/reedshield_codeguard.py}" -o reedshield/reedshield_codeguard.py
+          curl -sSfL "${REEDSHIELD_RULES_URL:-https://raw.githubusercontent.com/your-org/reedshield/main/spm/codeguard/rules.py}" -o reedshield/rules.py
+          mkdir -p spm/codeguard && cp reedshield/rules.py spm/codeguard/rules.py && printf 'from .rules import *\n' > spm/codeguard/__init__.py
+      - name: Scan
+        env:
+          REEDSHIELD_TOKEN: ${{ secrets.REEDSHIELD_TOKEN }}
+        run: |
+          python reedshield/reedshield_codeguard.py . --fail-on HIGH --json codeguard.json \
+            ${REEDSHIELD_URL:+--post "$REEDSHIELD_URL"} --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
+        # REEDSHIELD_URL example: https://reedshield.example.com/api/spm
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reedshield-codeguard
+          path: codeguard.json

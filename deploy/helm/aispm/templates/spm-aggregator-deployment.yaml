@@ -1,0 +1,59 @@
+# deploy/helm/aispm/templates/spm-aggregator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spm-aggregator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  # 2 replicas + topology spread = no SPOF.  Reads from Kafka in a
+  # consumer-group; partition assignment splits work across replicas.
+  # Writes to Postgres are now ON-CONFLICT-safe (uq_snapshot constraint
+  # added May 2026), so concurrent writes from both replicas converge.
+  replicas: {{ .Values.spmAggregator.replicas | default 2 }}
+  selector:
+    matchLabels: { app: spm-aggregator }
+  template:
+    metadata:
+      labels: { app: spm-aggregator }
+    spec:
+      containers:
+        - name: spm-aggregator
+          image: {{ include "aispm.image" .Values.images.spmAggregator }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            # Prometheus metrics — also doubles as the readiness probe
+            # target. The aggregator is otherwise headless (no HTTP API);
+            # its data plane is Kafka consumer + Postgres writer threads.
+            - name: metrics
+              containerPort: 9091
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: SPM_DB_URL
+              value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+            - name: SPM_API_URL
+              value: "http://spm-api.{{ .Values.global.namespace }}.svc.cluster.local:8092"
+            - name: SPM_MODEL_BLOCK_THRESHOLD
+              value: "0.85"
+            - name: SPM_SNAPSHOT_INTERVAL_SEC
+              value: "300"
+            - name: SPM_ENFORCEMENT_WINDOW
+              value: "3"
+          readinessProbe:
+            # /metrics is always 200 once Prometheus client is initialized
+            # (start_http_server(9091) in app.py:main). The aggregator
+            # doesn't expose a dedicated /health — Kafka consumer health
+            # is enforced by group membership, DB health by per-message
+            # processing. If you add a real /health endpoint later,
+            # switch this back.
+            httpGet: { path: /metrics, port: 9091 }
+            initialDelaySeconds: 15
+            periodSeconds: 10

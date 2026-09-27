@@ -1,0 +1,42 @@
+[
+  {
+    "framework": "CERT_IN",
+    "function": "DIRECTIONS_2022",
+    "category": "CERTIN-2022-IV",
+    "subcategory": "Direction (iv) Report cyber incidents within 6 hours of noticing",
+    "cpm_control": "Breach clock 6-hour window",
+    "evaluation_rule": "breach_runbook_ready"
+  },
+  {
+    "framework": "CERT_IN",
+    "function": "DIRECTIONS_2022",
+    "category": "CERTIN-2022-V",
+    "subcategory": "Direction (v) Maintain ICT logs for 180 days within India",
+    "cpm_control": "Audit export + retention setting",
+    "evaluation_rule": "log_retention_180d"
+  },
+  {
+    "framework": "CERT_IN",
+    "function": "DIRECTIONS_2022",
+    "category": "CERTIN-2022-III",
+    "subcategory": "Direction (iii) Synchronise system clocks to NTP",
+    "cpm_control": "Clock sync setting",
+    "evaluation_rule": "ntp_sync_configured"
+  },
+  {
+    "framework": "CERT_IN",
+    "function": "DIRECTIONS_2022",
+    "category": "CERTIN-2022-VI",
+    "subcategory": "Direction (vi) Point of contact and incident details available",
+    "cpm_control": "Cases workflow",
+    "evaluation_rule": "incident_case_workflow"
+  },
+  {
+    "framework": "CERT_IN",
+    "function": "DIRECTIONS_2022",
+    "category": "CERTIN-2022-AI",
+    "subcategory": "AI-specific: prompt injection and data exfiltration attempts detected and reported",
+    "cpm_control": "Guard model + alerts",
+    "evaluation_rule": "enforcement_action_exists"
+  }
+]

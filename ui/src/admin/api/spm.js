@@ -1,0 +1,251 @@
+// SPM admin-side REST helpers.
+//
+// All calls go through the Vite proxy:
+//   /api/spm/*    →  spm_api   (port 8092)
+//   /api/v1/*     →  orchestrator (port 8094) — used here only for policies
+//
+// Token handling delegates to ui/src/api.js (Keycloak-backed getToken).
+
+import { getToken } from '../../api.js'
+
+const SPM_BASE      = '/api/spm'
+const POLICIES_BASE = '/api/v1/policies'
+
+async function _authHeaders() {
+  const token = await getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+function _errFrom(res, body) {
+  const detail = (body && body.detail) ?? null
+  // Backend returns {detail: {error, message, ...}} for structured errors
+  // (e.g. duplicate model), and {detail: "..."} for plain-string errors.
+  if (detail && typeof detail === 'object') {
+    const e = new Error(detail.message || detail.error || `Request failed (${res.status})`)
+    e.status = res.status
+    e.detail = detail
+    return e
+  }
+  const e = new Error((typeof detail === 'string' && detail) || `Request failed (${res.status})`)
+  e.status = res.status
+  return e
+}
+
+// ── Models ──────────────────────────────────────────────────────────────────
+
+export async function fetchModels({ tenant_id } = {}) {
+  const qs   = tenant_id ? `?tenant_id=${encodeURIComponent(tenant_id)}` : ''
+  const res  = await fetch(`${SPM_BASE}/models${qs}`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return Array.isArray(body) ? body : []
+}
+
+/**
+ * Register a new model via multipart upload.
+ *
+ * @param {FormData} formData — must include `name`, `version`, and `file` plus
+ *        any optional metadata fields (provider, owner, model_type, notes, …).
+ * @param {object} [opts]
+ * @param {(pct: number) => void} [opts.onProgress] — called with 0..100 as the
+ *        file uploads. fetch() has no upload-progress API, so this uses XHR.
+ * @param {AbortSignal} [opts.signal] — abort the in-flight upload.
+ * @returns {Promise<object>} the created ModelResponse row.
+ * @throws {Error & {status:number, detail?:object}} on HTTP failure.
+ */
+export function registerModelWithFile(formData, { onProgress, signal } = {}) {
+  return new Promise(async (resolve, reject) => {
+    const token = await getToken()
+    const xhr   = new XMLHttpRequest()
+    xhr.open('POST', `${SPM_BASE}/models/upload`, true)
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+
+    xhr.upload.onprogress = (ev) => {
+      if (!onProgress || !ev.lengthComputable) return
+      onProgress(Math.round((ev.loaded / ev.total) * 100))
+    }
+
+    xhr.onload = () => {
+      let body
+      try { body = JSON.parse(xhr.responseText || '{}') } catch { body = {} }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body)
+      } else {
+        // Mirror the fetch error shape so callers can branch on `.status` / `.detail`
+        const fakeRes = { status: xhr.status }
+        reject(_errFrom(fakeRes, body))
+      }
+    }
+    xhr.onerror   = () => reject(Object.assign(new Error('Network error during upload'), { status: 0 }))
+    xhr.onabort   = () => reject(Object.assign(new Error('Upload cancelled'),           { status: 0, aborted: true }))
+    xhr.ontimeout = () => reject(Object.assign(new Error('Upload timed out'),           { status: 0 }))
+
+    if (signal) {
+      if (signal.aborted) { xhr.abort(); return }
+      signal.addEventListener('abort', () => xhr.abort(), { once: true })
+    }
+
+    xhr.send(formData)
+  })
+}
+
+// ── Posture (real data from seeded posture_snapshots table) ─────────────────
+//
+// The Posture page used to render entirely from hardcoded JS constants even
+// though seed_db.py seeds 30 daily PostureSnapshot rows on first boot.
+// These two helpers wire the page to the real seeded data.
+//
+// Both fetchers degrade to a safe empty-shape on network/API failure so the
+// page can still render its rich (still-mocked) sub-sections offline.
+
+export async function fetchPostureSnapshots({ days = 30, tenantId = 'global', modelId } = {}) {
+  try {
+    const qs = new URLSearchParams({ days: String(days), tenant_id: tenantId })
+    if (modelId) qs.set('model_id', modelId)
+    const res = await fetch(`${SPM_BASE}/posture/snapshots?${qs}`, { headers: await _authHeaders() })
+    if (!res.ok) return []
+    const body = await res.json().catch(() => [])
+    return Array.isArray(body) ? body : []
+  } catch {
+    return []
+  }
+}
+
+export async function fetchPostureSummary({ days = 30, tenantId = 'global', modelId } = {}) {
+  try {
+    const qs = new URLSearchParams({ days: String(days), tenant_id: tenantId })
+    if (modelId) qs.set('model_id', modelId)
+    const res = await fetch(`${SPM_BASE}/posture/summary?${qs}`, { headers: await _authHeaders() })
+    if (res.status === 401 && typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+      window.location.href = '/login'
+      return null
+    }
+    if (!res.ok) return null
+    return await res.json().catch(() => null)
+  } catch {
+    return null
+  }
+}
+
+// ── Policies (read from CPM via orchestrator) ───────────────────────────────
+
+export async function fetchPolicies() {
+  try {
+    const res  = await fetch(POLICIES_BASE, { headers: await _authHeaders() })
+    if (!res.ok) return []                  // orchestrator offline → empty list
+    const body = await res.json().catch(() => [])
+    if (!Array.isArray(body)) return []
+    return body.map(p => ({
+      id:       p.id ?? p.policy_id ?? p.name,
+      name:     p.name ?? p.title ?? String(p.id ?? 'policy'),
+      state:    p.state ?? null,
+      is_active: !!p.is_active,
+    }))
+  } catch {
+    return []
+  }
+}
+
+// ── Compliance frameworks ─────────────────────────────────────────────────────
+
+/** All compliance controls across every framework (from the evidence engine). */
+export async function fetchComplianceReport(framework = 'all') {
+  const res  = await fetch(`${SPM_BASE}/compliance/nist-airm/report?framework=${encodeURIComponent(framework)}`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+
+// ── Shadow AI discovery ───────────────────────────────────────────────────────
+
+export async function fetchShadowAiSummary(days = 30) {
+  const res  = await fetch(`${SPM_BASE}/discovery/shadow-ai/summary?days=${days}`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+export async function fetchShadowAiApps() {
+  const res  = await fetch(`${SPM_BASE}/discovery/shadow-ai/apps`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ([]))
+  if (!res.ok) throw _errFrom(res, body)
+  return Array.isArray(body) ? body : []
+}
+export async function patchShadowAiApp(id, patch) {
+  const res  = await fetch(`${SPM_BASE}/discovery/shadow-ai/apps/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) }, body: JSON.stringify(patch),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+export async function loadShadowAiSample() {
+  const res  = await fetch(`${SPM_BASE}/discovery/shadow-ai/sample`, { method: 'POST', headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+
+// ── Machine identities (NHI) ──────────────────────────────────────────────────
+
+export async function fetchIdentities() {
+  const res  = await fetch(`${SPM_BASE}/identities`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ([]))
+  if (!res.ok) throw _errFrom(res, body)
+  return Array.isArray(body) ? body : []
+}
+export async function fetchIdentitiesSummary() {
+  const res  = await fetch(`${SPM_BASE}/identities/summary`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+export async function syncIdentities() {
+  const res  = await fetch(`${SPM_BASE}/identities/sync`, { method: 'POST', headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+export async function identityAction(id, action, patch) {
+  const method = patch ? 'PATCH' : 'POST'
+  const url    = patch ? `${SPM_BASE}/identities/${id}` : `${SPM_BASE}/identities/${id}/${action}`
+  const res    = await fetch(url, {
+    method, headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) },
+    body: patch ? JSON.stringify(patch) : undefined,
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+
+// ── Code Guardrails ───────────────────────────────────────────────────────────
+
+export async function fetchCodeScans() {
+  const res  = await fetch(`${SPM_BASE}/codeguard/scans`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ([]))
+  if (!res.ok) throw _errFrom(res, body)
+  return Array.isArray(body) ? body : []
+}
+export async function fetchCodeScan(id) {
+  const res  = await fetch(`${SPM_BASE}/codeguard/scans/${id}`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+export async function runCodeSample() {
+  const res  = await fetch(`${SPM_BASE}/codeguard/scans/sample`, { method: 'POST', headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}
+export async function fetchCodeRules() {
+  const res  = await fetch(`${SPM_BASE}/codeguard/rules`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ([]))
+  if (!res.ok) throw _errFrom(res, body)
+  return Array.isArray(body) ? body : []
+}
+export async function fetchBomLicenseReport(tenantId = 't1') {
+  const res  = await fetch(`${SPM_BASE}/bom/license-report?tenant_id=${encodeURIComponent(tenantId)}`, { headers: await _authHeaders() })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw _errFrom(res, body)
+  return body
+}

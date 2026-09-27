@@ -1,0 +1,427 @@
+# deploy/helm/aispm/templates/services.yaml
+# Aggregated ClusterIP services for all stateless services.
+# StatefulSets (kafka) have their own headless service file.  redis and
+# spm-db are owned by external operators (Bitnami chart for redis, CNPG
+# for spm-db) which create their own Services with proper helm metadata —
+# the chart used to render its own `redis` Service guarded by
+# `redis.enabled` but that conflicted with Bitnami's adoption (Helm
+# refused to import a non-helm-managed Service).  Removed May 2026.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: opa }
+  ports:
+    # `name: http` (and `appProtocol: HTTP`) tells Istio this is HTTP
+    # traffic so it applies HTTP-aware filters at the sidecar — required
+    # for path-based rules in opa-allow-platform AuthorizationPolicy
+    # to actually match. Without these, Istio treats 8181 as plain TCP
+    # and HTTP path filters silently never match.
+    - name: http
+      port: 8181
+      appProtocol: HTTP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guard-model
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: guard-model }
+  ports:
+    - port: 8200
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: garak-runner
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: garak-runner }
+  ports:
+    - port: 8099
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: api }
+  # ClientIP sessionAffinity pins each WebSocket connection to one pod,
+  # required because the api currently keeps WS state in process memory
+  # (see api-deployment.yaml + follow-up "extract WS state to Redis").
+  # Pod loss disconnects users hashed to that pod; they reconnect and
+  # the affinity table updates them onto the surviving pod.  10800s =
+  # default 3h Kubernetes timeout.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  ports:
+    - port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieval-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: retrieval-gateway }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: processor
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: processor }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-decider
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: policy-decider }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: agent }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memory-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: memory-service }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: executor
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: executor }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tool-parser
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: tool-parser }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: output-guard
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: output-guard }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: freeze-controller
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: freeze-controller }
+  ports:
+    - port: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-simulator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: policy-simulator }
+  ports:
+    - port: 8091
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-jobmanager
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: flink-jobmanager }
+  # ── HA bootstrap requirement ──────────────────────────────────────────
+  # JobManager HA is a Pekko cluster between flink-jobmanager-{0,1}.  Each
+  # pod resolves its peer via the per-pod DNS form
+  # (flink-jobmanager-1.flink-jobmanager.{ns}.svc.cluster.local) and joins
+  # the lease.  By default kube-dns/CoreDNS only publishes endpoints whose
+  # pod is Ready=true.  But during a rolling restart (or any cascading
+  # incident — Istio probe failure, containerd restart, OOM) BOTH JMs can
+  # be NotReady at the same instant; DNS then refuses to publish either,
+  # and each pod fails to bootstrap with java.net.UnknownHostException —
+  # a deadlock that only resolves on operator intervention.
+  #
+  # publishNotReadyAddresses=true tells kube-dns to publish endpoints
+  # regardless of readiness, breaking the cycle.  Same fix-pattern we
+  # already applied to the kafka headless service (templates/kafka-
+  # service.yaml) for the KRaft quorum bootstrap, for the same reason.
+  # The cost is purely cosmetic: external clients hitting the ClusterIP
+  # may briefly hit a NotReady pod, but Flink JM HA decides leadership
+  # by lease, so a NotReady JM still routes correctly.
+  publishNotReadyAddresses: true
+  ports:
+    - name: rest
+      port: 8081
+    - name: rpc
+      port: 6123
+    - name: blob
+      port: 6124
+      # Port 6124 is pinned in flink-conf.yaml (blob.server.port: 6124).
+      # Without a fixed port the TM/submitter can't reach the BLOB server
+      # through the Service — a random ephemeral port would change on restart.
+---
+# Headless service for TaskManager pod-to-pod + JM→TM discovery.
+# The flink-conf.yaml sets taskmanager.host: flink-taskmanager, which
+# resolves to this headless service's ClusterIP=None DNS entry. Without
+# this the JobManager cannot reach TaskManager containers to assign slots,
+# and newly-registered TMs fail with "address unreachable from JM" errors.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-taskmanager
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app: flink-taskmanager
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  clusterIP: None
+  selector: { app: flink-taskmanager }
+  ports:
+    - name: data
+      port: 6121   # TM data port (shuffle / network exchange)
+    - name: ipc
+      port: 6122   # TM IPC (internal RPC between TM instances)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: spm-api }
+  ports:
+    - port: 8092
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-mcp
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: spm-mcp }
+  ports:
+    # Same naming convention as opa / spm-llm-proxy — required for
+    # Istio HTTP-aware filtering (path-based AuthZ).
+    - name: http
+      port: 8500
+      appProtocol: HTTP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-llm-proxy
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: spm-llm-proxy }
+  ports:
+    # `name: http` + appProtocol so Istio attaches HTTP-aware filters —
+    # without these, path-based AuthorizationPolicy rules silently never
+    # match (Istio falls back to L4-only matching). See same fix on the
+    # opa Service above.
+    - name: http
+      port: 8500
+      appProtocol: HTTP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-aggregator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: spm-aggregator }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-orchestrator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: agent-orchestrator }
+  ports:
+    - port: 8094
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: threat-hunting-agent
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: threat-hunting-agent }
+  ports:
+    - port: 8095
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: ui }
+  ports:
+    - port: 3001
+# prometheus + grafana Services removed May 2026 along with their Deployments.

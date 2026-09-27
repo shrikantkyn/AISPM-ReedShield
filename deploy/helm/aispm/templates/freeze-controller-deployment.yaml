@@ -1,0 +1,49 @@
+# deploy/helm/aispm/templates/freeze-controller-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: freeze-controller
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  # 2 replicas + topology spread = no SPOF.  Reads/writes flag state
+  # from Postgres (HA via CNPG); both replicas can independently
+  # process the same freeze decision because the underlying UPDATE is
+  # idempotent (sets the same freeze flag).  If concurrent writes ever
+  # produce non-idempotent side effects, add a Kubernetes-lease leader
+  # election on top.
+  replicas: {{ .Values.freezeController.replicas | default 2 }}
+  selector:
+    matchLabels: { app: freeze-controller }
+  template:
+    metadata:
+      labels: { app: freeze-controller }
+    spec:
+      containers:
+        - name: freeze-controller
+          image: {{ include "aispm.image" .Values.images.freezeCtrl }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /health, port: 8090 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0444
